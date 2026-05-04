@@ -23,6 +23,7 @@
 #include "tt.h"
 #include "rays.h"
 #include "bitboard.h"
+#include "line_pattern.h"
 #include "nnue/nnue.h"
 #include <iostream>
 #include <fstream>
@@ -372,7 +373,7 @@ void init_uci_options() {
             if (g_use_nnue)
                 return "NNUE weights loaded from " + g_eval_file
                      + (g_use_pure_nnue ? "; pure NNUE eval active; hash cleared"
-                                        : "; residual NNUE eval active; hash cleared");
+                                        : "; Fusion NNUE v2 eval active; hash cleared");
             return "NNUE weights loaded from " + g_eval_file
                  + "; Use NNUE=false so classical eval remains active; hash cleared";
         }
@@ -394,7 +395,7 @@ void init_uci_options() {
         if (g_nnue_loaded)
             return g_use_pure_nnue
                  ? "Use NNUE enabled; pure NNUE eval is active"
-                 : "Use NNUE enabled; residual NNUE is active";
+                 : "Use NNUE enabled; Fusion NNUE v2 is active";
         return "Use NNUE enabled, but no valid EvalFile is loaded; using classical eval";
     });
 
@@ -691,9 +692,10 @@ int main() {
     init_bitboards();
     init_attack_tables();     // PEXT O(1) queen attack lookup tables (~3 MB)
     init_between_line_bb();   // BETWEEN_BB + LINE_BB path masks (~320 KB)
+    init_line_patterns();     // AmazonsNNUE-v2 line pattern features
     if (NNUE::load_weights(g_eval_file)) {
         g_nnue_loaded = true;
-        std::cout << "info string NNUE weights loaded successfully from " << g_eval_file << ".\n";
+        std::cout << "info string AMZNUE2 weights loaded successfully from " << g_eval_file << ".\n";
     } else {
         g_nnue_loaded = false;
         std::cout << "info string Failed to load " << g_eval_file
@@ -753,15 +755,20 @@ int main() {
             Score m = eval_mobility(g_pos);
             EvalBreakdown bd;
             get_eval_breakdown(g_pos, bd);
+            EvalInfo ei;
+            get_eval_info(g_pos, ei);
             Score classical = evaluate_classical(g_pos);
             Score n = g_nnue_loaded
-                    ? NNUE::evaluate_nnue(g_pos.side_to_move, g_pos.history[g_pos.ply].accumulator)
+                    ? NNUE::evaluate_nnue(g_pos.side_to_move,
+                                          g_pos.history[g_pos.ply].accumulator,
+                                          ei.global.v,
+                                          ei.phase_bucket)
                     : 0;
             Score total = evaluate(g_pos);
             const bool nnue_active = g_use_nnue && g_nnue_loaded;
             const char* mode_name = !nnue_active ? "Classical"
                                   : g_use_pure_nnue ? "Pure NNUE"
-                                  : g_use_residual_nnue ? "Classical + residual NNUE"
+                                  : g_use_residual_nnue ? "Fusion NNUE v2"
                                   : "Classical";
             std::string nnue_status;
             if (!g_nnue_loaded)
@@ -773,6 +780,7 @@ int main() {
                       << "Mobility  : " << m << " (x" << g_mobility_weight
                       << " = " << m * g_mobility_weight << ")\n"
                       << "StrongEval: phase " << bd.phase
+                      << " bucket " << bd.phase_bucket
                       << " active " << bd.active_areas
                       << " t1 " << bd.t1
                       << " t2 " << bd.t2
@@ -780,10 +788,16 @@ int main() {
                       << " p2 " << bd.p2
                       << " m " << bd.m
                       << " part " << bd.partition
+                      << " mob " << bd.mobility
                       << " rawW " << bd.raw_white << "\n"
                       << "Classical : " << classical << "\n"
                       << "NNUE      : " << n
                       << nnue_status << "\n"
+                      << "NNUE fmt  : " << NNUE::weight_format() << "\n"
+                      << "Global    :";
+            for (int i = 0; i < NNUE::GLOBAL_FEATURE_SIZE; ++i)
+                std::cout << ' ' << int(ei.global.v[i]);
+            std::cout << "\n"
                       << "Mode      : " << mode_name << "\n"
                       << "Total     : " << total
                       << " (from " << (g_pos.side_to_move == WHITE ? "White" : "Black")

@@ -99,7 +99,7 @@ Move MovePicker::next_move() {
     case STAGE_TT:
         stage_ = STAGE_KILLER_1;
         if (tt_move_ != MOVE_NONE && is_pseudo_legal(pos_, tt_move_)) {
-            tried_.push_back(tt_move_);
+            remember_tried(tt_move_);
             return tt_move_;
         }
         [[fallthrough]];
@@ -109,7 +109,7 @@ Move MovePicker::next_move() {
         if (ss_->killers[0] != MOVE_NONE &&
             !already_tried(ss_->killers[0]) &&
             is_pseudo_legal(pos_, ss_->killers[0])) {
-            tried_.push_back(ss_->killers[0]);
+            remember_tried(ss_->killers[0]);
             return ss_->killers[0];
         }
         [[fallthrough]];
@@ -119,7 +119,7 @@ Move MovePicker::next_move() {
         if (ss_->killers[1] != MOVE_NONE &&
             !already_tried(ss_->killers[1]) &&
             is_pseudo_legal(pos_, ss_->killers[1])) {
-            tried_.push_back(ss_->killers[1]);
+            remember_tried(ss_->killers[1]);
             return ss_->killers[1];
         }
         [[fallthrough]];
@@ -129,37 +129,44 @@ Move MovePicker::next_move() {
         if (counter_ != MOVE_NONE &&
             !already_tried(counter_) &&
             is_pseudo_legal(pos_, counter_)) {
-            tried_.push_back(counter_);
+            remember_tried(counter_);
             return counter_;
         }
         [[fallthrough]];
 
     case STAGE_GENERATE: {
         // Only now do we generate all moves (lazy!)
-        std::vector<Move> raw;
-        generate_moves(pos_, raw);
+        const int raw_count = generate_moves(pos_, buffer_.raw, MAX_LEGAL_MOVES);
         const Color us = pos_.side_to_move;
-        moves_.reserve(raw.size());
-        for (Move m : raw) {
+        move_count_ = 0;
+        for (int i = 0; i < raw_count; ++i) {
+            const Move m = buffer_.raw[i];
             int s = history_[us][move_from(m)][move_to(m)]
                   + arrow_history_[us][move_to(m)][move_arrow(m)]
+                  + from_arrow_history_[us][move_from(m)][move_arrow(m)]
                   + amazon_move_category_score(pos_, m, ss_);
-            moves_.push_back({m, s});
+            buffer_.moves[move_count_++] = {m, s};
         }
-        std::sort(moves_.begin(), moves_.end(),
-                  [](const ScoredMove& a, const ScoredMove& b) {
-                      return a.score > b.score;
-                  });
+
+        const auto better = [](const ScoredMove& a, const ScoredMove& b) {
+            return a.score > b.score;
+        };
+        if (top_k_ > 0 && move_count_ > top_k_) {
+            std::nth_element(buffer_.moves, buffer_.moves + top_k_, buffer_.moves + move_count_, better);
+            move_count_ = top_k_;
+        }
+        std::sort(buffer_.moves, buffer_.moves + move_count_, better);
+
         move_idx_ = 0;
         stage_ = STAGE_YIELD;
         [[fallthrough]];
     }
 
     case STAGE_YIELD:
-        while (move_idx_ < moves_.size()) {
-            Move m = moves_[move_idx_++].move;
+        while (move_idx_ < move_count_) {
+            Move m = buffer_.moves[move_idx_++].move;
             if (already_tried(m)) continue;
-            tried_.push_back(m);
+            remember_tried(m);
             return m;
         }
         stage_ = STAGE_DONE;

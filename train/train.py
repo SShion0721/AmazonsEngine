@@ -1,5 +1,7 @@
 import argparse
+import os
 import struct
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -10,14 +12,24 @@ from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from dataset import AmazonsDataset, RawCollate
+from dataset import (
+    AmazonsDataset,
+    RawCollate,
+    FEATURE_SIZE,
+    LINE_FEATURE_HASH,
+    GLOBAL_FEATURE_SIZE,
+    PHASE_BUCKETS,
+)
 
-FEATURE_SIZE = 300
-ACC_SIZE = 512
+BASE_ACC_SIZE = 512
+LINE_ACC_SIZE = 64
 HIDDEN_SIZE = 64
+SPARSE_INPUT_SIZE = 2 * BASE_ACC_SIZE + 2 * LINE_ACC_SIZE
 FT_QUANT_ONE = 127.0
 HIDDEN_WEIGHT_SCALE = 64.0
 OUTPUT_WEIGHT_SCALE = 16.0
+WEIGHT_MAGIC = b"AMZNUE2\0"
+LINE_SEED_BASE = 0xA17A5015BEE5C0DE
 
 
 def parse_csv_arg(text):
@@ -32,243 +44,198 @@ def parse_weight_list(text):
     values = parse_csv_arg(text)
     if values is None:
         return None
-
-    try:
-        weights = [float(v) for v in values]
-    except ValueError:
-        print(f"Invalid --mix-weights: {text}")
-        return None
-
-    if any(weight <= 0 for weight in weights):
-        print(f"All mix weights must be positive: {weights}")
-        return None
+    weights = [float(v) for v in values]
+    if any(w <= 0 for w in weights):
+        raise ValueError("--mix-weights must all be positive")
     return weights
-
-
-def default_feature_path_for_raw(raw_path):
-    return raw_path.with_suffix(".features.bin")
 
 
 def current_model_meta():
     return {
+        "arch": "AmazonsNNUE-v2",
         "feature_size": FEATURE_SIZE,
-        "acc_size": ACC_SIZE,
+        "base_acc_size": BASE_ACC_SIZE,
+        "line_hash": LINE_FEATURE_HASH,
+        "line_acc_size": LINE_ACC_SIZE,
         "hidden_size": HIDDEN_SIZE,
+        "global_feature_size": GLOBAL_FEATURE_SIZE,
+        "phase_buckets": PHASE_BUCKETS,
     }
 
 
-def describe_target_mode(train_target, score_loss=None, blend_lambda=0.0, score_scale=400.0, score_clip=0.0):
-    if train_target == "wdl":
-        print(f"Training Target: blended-wdl | lambda={blend_lambda} | score_scale={score_scale}")
-        print(f"  Target = {blend_lambda}*Outcome + {1.0 - blend_lambda}*Sigmoid(Score/{score_scale})")
-        return
+def ensure_feature_file(raw_path, feature_path, converter_path, skip_convert=False, force_convert=False):
+    raw_path = Path(raw_path)
+    feature_path = Path(feature_path)
+    converter_path = Path(converter_path)
 
-    clip_desc = "disabled" if score_clip <= 0.0 else f"+/-{score_clip}"
-    print(f"Training Target: score-regression | loss={score_loss} | score_scale={score_scale} | score_clip={clip_desc}")
-    print(f"  Target = clamp(Score, -clip, +clip) / {score_scale}")
+    if skip_convert:
+        return feature_path
+
+    needs_convert = force_convert or not feature_path.exists()
+    if feature_path.exists() and raw_path.exists():
+        needs_convert = needs_convert or os.path.getmtime(feature_path) < os.path.getmtime(raw_path)
+
+    if not needs_convert:
+        return feature_path
+
+    if not raw_path.exists():
+        raise FileNotFoundError(f"Raw selfplay data not found: {raw_path}")
+    if not converter_path.exists():
+        raise FileNotFoundError(f"convert_selfplay executable not found: {converter_path}")
+
+    feature_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [str(converter_path), str(raw_path), str(feature_path)]
+    print("Converting selfplay data:", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+    return feature_path
 
 
-class AmazonsNNUE(nn.Module):
+class AmazonsNNUEv2(nn.Module):
     def __init__(self):
         super().__init__()
-        self.l0 = nn.Linear(FEATURE_SIZE, ACC_SIZE)
-        self.l1 = nn.Linear(ACC_SIZE * 2, HIDDEN_SIZE)
+        self.base_l0 = nn.Linear(FEATURE_SIZE, BASE_ACC_SIZE)
+        self.line_l0 = nn.Embedding(LINE_FEATURE_HASH, LINE_ACC_SIZE)
+        self.line_l0_bias = nn.Parameter(torch.zeros(LINE_ACC_SIZE))
+        self.l1 = nn.Linear(SPARSE_INPUT_SIZE, HIDDEN_SIZE)
+        self.global_proj = nn.Linear(GLOBAL_FEATURE_SIZE, HIDDEN_SIZE, bias=False)
+        self.phase_bias = nn.Embedding(PHASE_BUCKETS, HIDDEN_SIZE)
         self.l2 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE)
-        self.l3 = nn.Linear(HIDDEN_SIZE, 1)
+        self.score_head = nn.Linear(HIDDEN_SIZE, 1)
+        self.wdl_head = nn.Linear(HIDDEN_SIZE, 1)
 
-    def forward(self, us, them):
-        acc_us = self.l0(us)
-        acc_them = self.l0(them)
+    def _line_acc(self, indices, signs):
+        emb = self.line_l0(indices)
+        return self.line_l0_bias + (emb * signs.unsqueeze(-1)).sum(dim=1)
 
-        act_us = torch.clamp(acc_us, 0.0, 1.0)
-        act_them = torch.clamp(acc_them, 0.0, 1.0)
+    def forward(self, base_us, base_them, line_idx_us, line_sign_us,
+                line_idx_them, line_sign_them, global_features, phase):
+        acc_us = torch.clamp(self.base_l0(base_us), 0.0, 1.0)
+        acc_them = torch.clamp(self.base_l0(base_them), 0.0, 1.0)
+        line_us = torch.clamp(self._line_acc(line_idx_us, line_sign_us), 0.0, 1.0)
+        line_them = torch.clamp(self._line_acc(line_idx_them, line_sign_them), 0.0, 1.0)
 
-        concat = torch.cat([act_us, act_them], dim=1)
-        act1 = torch.clamp(self.l1(concat), 0.0, 1.0)
-        act2 = torch.clamp(self.l2(act1), 0.0, 1.0)
-        return self.l3(act2)
+        sparse = torch.cat([acc_us, acc_them, line_us, line_them], dim=1)
+        h1 = self.l1(sparse) + self.global_proj(global_features) + self.phase_bias(phase)
+        h1 = torch.clamp(h1, 0.0, 1.0)
+        h2 = torch.clamp(self.l2(h1), 0.0, 1.0)
+        return self.score_head(h2), self.wdl_head(h2)
+
+
+def _write_int_array(f, arr, fmt, scale, lo, hi):
+    flat = np.asarray(arr, dtype=np.float64).reshape(-1) * scale
+    for value in flat:
+        f.write(struct.pack(fmt, int(np.clip(round(value), lo, hi))))
 
 
 def export_weights(model, path, output_scale):
-    # Quantize and export into the compact C++ layout.
-    #
-    # With score-regression training, model output approximates score/output_scale.
-    # With WDL training, model output is a logit that we reinterpret into engine
-    # score units at export time. In both cases output_scale defines how the raw
-    # float output maps back to the engine score domain.
     scale_hidden_bias = FT_QUANT_ONE * HIDDEN_WEIGHT_SCALE
     scale_output_bias = OUTPUT_WEIGHT_SCALE * output_scale
     scale_output_weight = OUTPUT_WEIGHT_SCALE * output_scale / FT_QUANT_ONE
 
-    print("Packing weights into memory layout aligned with C++ 'NetworkParameters'...")
-    print(f"  output_scale={output_scale} (engine score units per network output)")
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
-        l0_b = model.l0.bias.detach().cpu().numpy().flatten() * FT_QUANT_ONE
-        for b in l0_b:
-            f.write(struct.pack("<h", int(np.clip(b, -32768, 32767))))
+        f.write(struct.pack(
+            "<8sIIIIIIIIIIIIII",
+            WEIGHT_MAGIC,
+            2,
+            FEATURE_SIZE,
+            BASE_ACC_SIZE,
+            LINE_FEATURE_HASH,
+            LINE_ACC_SIZE,
+            HIDDEN_SIZE,
+            GLOBAL_FEATURE_SIZE,
+            PHASE_BUCKETS,
+            SPARSE_INPUT_SIZE,
+            int(FT_QUANT_ONE),
+            int(HIDDEN_WEIGHT_SCALE),
+            int(OUTPUT_WEIGHT_SCALE),
+            LINE_SEED_BASE & 0xFFFFFFFF,
+            LINE_SEED_BASE >> 32,
+        ))
 
-        l0_w = model.l0.weight.detach().cpu().numpy().T * FT_QUANT_ONE
-        for row in l0_w:
-            for w in row:
-                f.write(struct.pack("<h", int(np.clip(w, -32768, 32767))))
+        _write_int_array(f, model.base_l0.bias.detach().cpu().numpy(), "<h", FT_QUANT_ONE, -32768, 32767)
+        _write_int_array(f, model.base_l0.weight.detach().cpu().numpy().T, "<h", FT_QUANT_ONE, -32768, 32767)
+        _write_int_array(f, model.line_l0_bias.detach().cpu().numpy(), "<h", FT_QUANT_ONE, -32768, 32767)
+        _write_int_array(f, model.line_l0.weight.detach().cpu().numpy(), "<h", FT_QUANT_ONE, -32768, 32767)
 
-        l1_b = model.l1.bias.detach().cpu().numpy().flatten() * scale_hidden_bias
-        for b in l1_b:
-            f.write(struct.pack("<i", int(np.clip(b, -2147483648, 2147483647))))
+        _write_int_array(f, model.l1.bias.detach().cpu().numpy(), "<i", scale_hidden_bias, -2147483648, 2147483647)
+        _write_int_array(f, model.l1.weight.detach().cpu().numpy(), "<b", HIDDEN_WEIGHT_SCALE, -128, 127)
+        _write_int_array(f, model.global_proj.weight.detach().cpu().numpy().T, "<b", HIDDEN_WEIGHT_SCALE, -128, 127)
+        _write_int_array(f, model.phase_bias.weight.detach().cpu().numpy(), "<i", scale_hidden_bias, -2147483648, 2147483647)
 
-        l1_w = model.l1.weight.detach().cpu().numpy().T * HIDDEN_WEIGHT_SCALE
-        for row in l1_w:
-            for w in row:
-                f.write(struct.pack("<b", int(np.clip(w, -128, 127))))
+        _write_int_array(f, model.l2.bias.detach().cpu().numpy(), "<i", scale_hidden_bias, -2147483648, 2147483647)
+        _write_int_array(f, model.l2.weight.detach().cpu().numpy(), "<b", HIDDEN_WEIGHT_SCALE, -128, 127)
 
-        l2_b = model.l2.bias.detach().cpu().numpy().flatten() * scale_hidden_bias
-        for b in l2_b:
-            f.write(struct.pack("<i", int(np.clip(b, -2147483648, 2147483647))))
+        _write_int_array(f, model.score_head.bias.detach().cpu().numpy(), "<i", scale_output_bias, -2147483648, 2147483647)
+        _write_int_array(f, model.score_head.weight.detach().cpu().numpy().reshape(-1), "<b", scale_output_weight, -128, 127)
 
-        l2_w = model.l2.weight.detach().cpu().numpy().T * HIDDEN_WEIGHT_SCALE
-        for row in l2_w:
-            for w in row:
-                f.write(struct.pack("<b", int(np.clip(w, -128, 127))))
-
-        l3_b = model.l3.bias.detach().cpu().numpy().flatten() * scale_output_bias
-        for b in l3_b:
-            f.write(struct.pack("<i", int(np.clip(b, -2147483648, 2147483647))))
-
-        l3_w = model.l3.weight.detach().cpu().numpy().T * scale_output_weight
-        for row in l3_w:
-            for w in row:
-                f.write(struct.pack("<b", int(np.clip(w, -128, 127))))
+    print(f"Exported AMZNUE2 weights: {path}")
 
 
 def save_checkpoint(model, optimizer, epoch, avg_loss, checkpoint_path, training_meta):
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    torch.save({
         "epoch": epoch,
         "avg_loss": float(avg_loss),
         "model_meta": current_model_meta(),
         "training_meta": training_meta,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
-    }
-    torch.save(payload, checkpoint_path)
+    }, checkpoint_path)
     print(f"Checkpoint saved: {checkpoint_path} (epoch={epoch + 1}, avg_loss={avg_loss:.6f})")
 
 
 def load_checkpoint_if_available(model, optimizer, checkpoint_path, device):
-    if not checkpoint_path.exists():
+    if checkpoint_path is None or not checkpoint_path.exists():
         print(f"No checkpoint found at: {checkpoint_path}")
         return 0
-
     ckpt = torch.load(checkpoint_path, map_location=device)
-    if "model_state_dict" not in ckpt:
-        print(f"Checkpoint missing model_state_dict: {checkpoint_path}")
-        return 0
-
     saved_meta = ckpt.get("model_meta")
-    current_meta = current_model_meta()
-    if saved_meta is not None and saved_meta != current_meta:
-        raise RuntimeError(
-            f"Checkpoint architecture mismatch: saved={saved_meta}, current={current_meta}. "
-            "This usually means the checkpoint was trained with the old 256/32/32 network and "
-            "cannot be resumed/exported with the new 512/64/64 build."
-        )
-
-    try:
-        model.load_state_dict(ckpt["model_state_dict"])
-    except RuntimeError as exc:
-        raise RuntimeError(
-            f"Failed to load checkpoint '{checkpoint_path}'. The saved tensor shapes do not match "
-            f"the current architecture {current_meta}. Old checkpoints from the smaller network "
-            "need a fresh retrain under the new architecture."
-        ) from exc
-
+    if saved_meta is not None and saved_meta != current_model_meta():
+        raise RuntimeError(f"Checkpoint architecture mismatch: saved={saved_meta}, current={current_model_meta()}")
+    model.load_state_dict(ckpt["model_state_dict"])
     if "optimizer_state_dict" in ckpt:
-        try:
-            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        except ValueError:
-            print(f"Warning: optimizer state in {checkpoint_path} was skipped due to shape mismatch.")
-
-    last_epoch = int(ckpt.get("epoch", -1))
-    next_epoch = last_epoch + 1
-    print(f"Resumed from checkpoint: {checkpoint_path} (last_epoch={last_epoch + 1})")
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    next_epoch = int(ckpt.get("epoch", -1)) + 1
+    print(f"Resumed from checkpoint: {checkpoint_path} (next_epoch={next_epoch + 1})")
     return next_epoch
 
 
-def load_single_training_dataset(raw_bin_path):
-    return AmazonsDataset(str(raw_bin_path))
+def load_single_training_dataset(feature_bin_path):
+    return AmazonsDataset(str(feature_bin_path))
 
 
-def build_mixed_dataset_and_sampler(
-    raw_bin_paths,
-    feature_bin_paths,
-    converter_path,
-    convert_mode,
-    skip_convert=False,
-    force_convert=False,
-    mix_weights=None,
-    samples_per_epoch=0,
-):
-    datasets = []
-    dataset_sizes = []
-    for index, raw_bin_path in enumerate(raw_bin_paths):
-        feature_bin_path = feature_bin_paths[index]
-        dataset = load_single_training_dataset(raw_bin_path=raw_bin_path)
-        if dataset is None:
-            return None, None
-        if len(dataset) == 0:
-            print(f"Warning: empty dataset skipped: {raw_bin_path}")
-            continue
-        datasets.append(dataset)
-        dataset_sizes.append(len(dataset))
-
+def build_mixed_dataset_and_sampler(feature_bin_paths, mix_weights=None, samples_per_epoch=0):
+    datasets = [load_single_training_dataset(path) for path in feature_bin_paths]
+    datasets = [ds for ds in datasets if len(ds) > 0]
     if not datasets:
-        print("No usable datasets found for mix training.")
         return None, None
-
     if len(datasets) == 1:
-        print(f"Mix requested but only one non-empty source, using single dataset ({dataset_sizes[0]} samples).")
         return datasets[0], None
 
+    sizes = [len(ds) for ds in datasets]
     if mix_weights is None:
         mix_weights = [1.0] * len(datasets)
-
     if len(mix_weights) != len(datasets):
-        print(f"Mix weights count mismatch: weights={len(mix_weights)} sources={len(datasets)}")
-        return None, None
+        raise ValueError("--mix-weights count must match data sources")
+    total = sum(mix_weights)
+    ratios = [w / total for w in mix_weights]
+    per_sample = []
+    for ratio, size in zip(ratios, sizes):
+        per_sample.extend([ratio / size] * size)
 
-    weight_sum = sum(mix_weights)
-    normalized = [weight / weight_sum for weight in mix_weights]
-    per_sample_weights = []
-    for source_weight, source_size in zip(normalized, dataset_sizes):
-        per_sample_weights.extend([source_weight / source_size] * source_size)
-
-    concat_dataset = ConcatDataset(datasets)
+    concat = ConcatDataset(datasets)
     if samples_per_epoch <= 0:
-        samples_per_epoch = len(concat_dataset)
-
-    sampler = WeightedRandomSampler(
-        weights=torch.DoubleTensor(per_sample_weights),
-        num_samples=samples_per_epoch,
-        replacement=True,
-    )
-
-    print(f"Mix sources: {len(datasets)} | sizes={dataset_sizes}")
-    print(f"Mix ratios : {[round(x, 4) for x in normalized]} | samples/epoch={samples_per_epoch}")
-    return concat_dataset, sampler
-
-
-def make_criterion(train_target, score_loss):
-    if train_target == "wdl":
-        return nn.BCEWithLogitsLoss()
-    if score_loss == "mse":
-        return nn.MSELoss()
-    if score_loss == "smoothl1":
-        return nn.SmoothL1Loss(beta=0.25)
-    raise ValueError(f"Unsupported score loss: {score_loss}")
+        samples_per_epoch = len(concat)
+    sampler = WeightedRandomSampler(torch.DoubleTensor(per_sample), samples_per_epoch, replacement=True)
+    print(f"Mix sources: {len(datasets)} | sizes={sizes} | ratios={[round(x, 4) for x in ratios]}")
+    return concat, sampler
 
 
 def train(
     raw_bin_path,
+    feature_bin_path,
+    converter_path,
     nnue_out_path,
     epochs=50,
     checkpoint_path=None,
@@ -279,259 +246,218 @@ def train(
     mix_feature_bin_paths=None,
     mix_weights=None,
     samples_per_epoch=0,
-    train_target="score",
-    score_loss="smoothl1",
-    blend_lambda=0.5,
-    score_scale=400.0,
+    skip_convert=False,
+    force_convert=False,
+    score_scale=500.0,
     score_clip=2000.0,
     output_scale=0.0,
+    wdl_loss_weight=0.0,
+    residual_loss_weight=0.25,
     augment_d8=True,
-    batch_size=32768,
-    lr=0.005,
+    batch_size=8192,
+    lr=0.001,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training device: {device}")
     if device.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         torch.backends.cudnn.benchmark = True
-
     if output_scale <= 0.0:
         output_scale = score_scale
-    print(f"Export Output Scale: {output_scale}")
 
-    model = AmazonsNNUE().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    model = AmazonsNNUEv2().to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
 
     if export_only:
         if checkpoint_path is None:
-            print("Export-only requested but no checkpoint path was provided.")
-            return
+            raise RuntimeError("--export-only requires --checkpoint")
         load_checkpoint_if_available(model, optimizer, checkpoint_path, device)
-        nnue_out_path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Exporting checkpoint weights to: {nnue_out_path}")
         export_weights(model, nnue_out_path, output_scale)
-        print(f"Done! You can now load '{nnue_out_path}' in the C++ engine.")
         return
 
-    sampler = None
     if mix_raw_bin_paths:
-        dataset, sampler = build_mixed_dataset_and_sampler(
-            raw_bin_paths=mix_raw_bin_paths,
-            feature_bin_paths=mix_feature_bin_paths,
-            converter_path=None,
-            convert_mode="file",
-            skip_convert=True,
-            force_convert=False,
-            mix_weights=mix_weights,
-            samples_per_epoch=samples_per_epoch,
-        )
-        if dataset is None:
-            return
+        feature_paths = []
+        for index, raw_path in enumerate(mix_raw_bin_paths):
+            feature_path = mix_feature_bin_paths[index]
+            feature_paths.append(ensure_feature_file(raw_path, feature_path, converter_path, skip_convert, force_convert))
+        dataset, sampler = build_mixed_dataset_and_sampler(feature_paths, mix_weights, samples_per_epoch)
     else:
-        dataset = load_single_training_dataset(raw_bin_path=raw_bin_path)
-        if dataset is None:
-            return
+        feature_path = ensure_feature_file(raw_bin_path, feature_bin_path, converter_path, skip_convert, force_convert)
+        dataset = load_single_training_dataset(feature_path)
+        sampler = None
 
-    if len(dataset) == 0:
+    if dataset is None or len(dataset) == 0:
+        print("No training samples available.")
         return
 
-    collate_fn = RawCollate(augment_d8=augment_d8)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=(sampler is None),
         sampler=sampler,
-        collate_fn=collate_fn,
+        collate_fn=RawCollate(augment_d8=augment_d8),
         pin_memory=(device.type == "cuda"),
-        num_workers=14,
-        prefetch_factor=2,
-        persistent_workers=True if device.type == "cuda" else False,
+        num_workers=0 if os.name == "nt" else 8,
     )
 
-    criterion = make_criterion(train_target, score_loss)
-    print(f"Model: {FEATURE_SIZE} -> {ACC_SIZE}x2 -> {HIDDEN_SIZE} -> {HIDDEN_SIZE} -> 1")
-    print(f"D8 augmentation: {'on' if augment_d8 else 'off'}")
-    describe_target_mode(
-        train_target,
-        score_loss=score_loss,
-        blend_lambda=blend_lambda,
-        score_scale=score_scale,
-        score_clip=score_clip,
-    )
+    score_criterion = nn.SmoothL1Loss(beta=0.25)
+    wdl_criterion = nn.BCEWithLogitsLoss()
+    print(f"Model: base 300->{BASE_ACC_SIZE}, line {LINE_FEATURE_HASH}->{LINE_ACC_SIZE}, sparse {SPARSE_INPUT_SIZE}->{HIDDEN_SIZE}")
+    print(f"Loss: score + {residual_loss_weight}*residual + {wdl_loss_weight}*wdl | score_scale={score_scale}")
 
     training_meta = {
-        "train_target": train_target,
-        "score_loss": score_loss,
-        "blend_lambda": blend_lambda,
         "score_scale": score_scale,
         "score_clip": score_clip,
         "output_scale": output_scale,
+        "wdl_loss_weight": wdl_loss_weight,
+        "residual_loss_weight": residual_loss_weight,
         "augment_d8": augment_d8,
         "batch_size": batch_size,
         "lr": lr,
     }
 
-    start_epoch = 0
+    start_epoch = load_checkpoint_if_available(model, optimizer, checkpoint_path, device) if resume else 0
     best_loss = float("inf")
-
     log_root = checkpoint_path.parent if checkpoint_path is not None else nnue_out_path.parent
-    log_dir = log_root / "runs" / "nnue_experiment"
-    writer = SummaryWriter(log_dir=str(log_dir))
-    print(f"TensorBoard logs will be saved to: {log_dir}")
-    print("Run 'tensorboard --logdir runs' to view training progress.")
-
-    if resume and checkpoint_path is not None:
-        start_epoch = load_checkpoint_if_available(model, optimizer, checkpoint_path, device)
-        if start_epoch >= epochs:
-            print(f"Checkpoint already at epoch {start_epoch}, target epochs={epochs}.")
-            print(f"Skipping training loop and exporting current weights to: {nnue_out_path}")
-            nnue_out_path.parent.mkdir(parents=True, exist_ok=True)
-            export_weights(model, nnue_out_path, output_scale)
-            print(f"Done! You can now resume the C++ engine to load '{nnue_out_path}'.")
-            return
+    writer = SummaryWriter(log_dir=str(log_root / "runs" / "nnue_v2"))
 
     for epoch in range(start_epoch, epochs):
         model.train()
         total_loss = 0.0
         pbar = tqdm(loader, desc=f"Epoch {epoch + 1}/{epochs}")
-        for b_us, b_them, b_target, b_score in pbar:
-            optimizer.zero_grad()
+        for batch in pbar:
+            (
+                base_us, base_them,
+                line_idx_us, line_sign_us,
+                line_idx_them, line_sign_them,
+                global_features, phase,
+                classical, target, score,
+            ) = batch
 
-            b_us = b_us.to(device, non_blocking=True).float()
-            b_them = b_them.to(device, non_blocking=True).float()
-            pred = model(b_us, b_them)
+            base_us = base_us.to(device, non_blocking=True).float()
+            base_them = base_them.to(device, non_blocking=True).float()
+            line_idx_us = line_idx_us.to(device, non_blocking=True).long()
+            line_sign_us = line_sign_us.to(device, non_blocking=True).float()
+            line_idx_them = line_idx_them.to(device, non_blocking=True).long()
+            line_sign_them = line_sign_them.to(device, non_blocking=True).float()
+            global_features = global_features.to(device, non_blocking=True).float()
+            phase = phase.to(device, non_blocking=True).long()
+            classical = classical.to(device, non_blocking=True).float()
+            target = target.to(device, non_blocking=True).float()
+            score = score.to(device, non_blocking=True).float()
 
-            if train_target == "wdl":
-                b_target = b_target.to(device, non_blocking=True).float()
-                b_score = b_score.to(device, non_blocking=True).float()
-                score_win_prob = torch.sigmoid(b_score / score_scale)
-                target = blend_lambda * b_target + (1.0 - blend_lambda) * score_win_prob
-            else:
-                b_score = b_score.to(device, non_blocking=True).float()
-                if score_clip > 0.0:
-                    b_score = torch.clamp(b_score, -score_clip, score_clip)
-                target = b_score / score_scale
+            if score_clip > 0.0:
+                score = torch.clamp(score, -score_clip, score_clip)
 
-            loss = criterion(pred, target)
+            score_target = score / score_scale
+            residual_target = (score - classical) / score_scale
+
+            optimizer.zero_grad(set_to_none=True)
+            pred, wdl = model(
+                base_us, base_them,
+                line_idx_us, line_sign_us,
+                line_idx_them, line_sign_them,
+                global_features, phase,
+            )
+            loss = score_criterion(pred, score_target)
+            if residual_loss_weight > 0.0:
+                loss = loss + residual_loss_weight * score_criterion(pred - classical / score_scale, residual_target)
+            if wdl_loss_weight > 0.0:
+                loss = loss + wdl_loss_weight * wdl_criterion(wdl, target)
             loss.backward()
             optimizer.step()
-            total_loss += loss.item()
 
+            total_loss += loss.item()
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         avg_loss = total_loss / len(loader)
         writer.add_scalar("Loss/train", avg_loss, epoch)
 
         if checkpoint_path is not None and save_every > 0:
-            is_periodic = ((epoch + 1) % save_every == 0)
-            is_last = (epoch + 1) == epochs
-            if is_periodic or is_last:
+            if (epoch + 1) % save_every == 0 or (epoch + 1) == epochs:
                 save_checkpoint(model, optimizer, epoch, avg_loss, checkpoint_path, training_meta)
 
         if avg_loss < best_loss:
             best_loss = avg_loss
             if checkpoint_path is not None:
-                best_ckpt_path = checkpoint_path.parent / "best.ckpt"
-                save_checkpoint(model, optimizer, epoch, avg_loss, best_ckpt_path, training_meta)
-            best_nnue_path = nnue_out_path.parent / f"{nnue_out_path.stem}_best.bin"
-            export_weights(model, best_nnue_path, output_scale)
-            print(f"Epoch {epoch + 1}/{epochs} - Loss: {avg_loss:.6f} (New Best!)")
-        elif (epoch + 1) % 5 == 0:
-            print(f"Epoch {epoch + 1}/{epochs} - Loss: {avg_loss:.6f}")
+                save_checkpoint(model, optimizer, epoch, avg_loss, checkpoint_path.parent / "best.ckpt", training_meta)
+            export_weights(model, nnue_out_path.parent / f"{nnue_out_path.stem}_best.bin", output_scale)
+            print(f"Epoch {epoch + 1}/{epochs} - Loss: {avg_loss:.6f} (new best)")
 
     writer.close()
-    print(f"Training complete. Best Loss: {best_loss:.6f}")
-    print(f"Exporting final network to: {nnue_out_path}")
-    nnue_out_path.parent.mkdir(parents=True, exist_ok=True)
     export_weights(model, nnue_out_path, output_scale)
-    print(f"Done! You can now resume the C++ engine to load '{nnue_out_path}'.")
+    print(f"Training complete. Best loss: {best_loss:.6f}")
 
 
 if __name__ == "__main__":
     repo_root = Path(__file__).resolve().parent.parent
     default_raw_bin = repo_root / "selfplay_data.bin"
-    default_feature_bin = repo_root / "selfplay_features.bin"
+    default_feature_bin = repo_root / "selfplay_features_v2.bin"
     default_converter = repo_root / "build" / "convert_selfplay.exe"
-    default_nnue_out = repo_root / "nnue.bin"
+    default_nnue_out = repo_root / "nnue_v2.bin"
 
-    parser = argparse.ArgumentParser(description="Train NNUE from selfplay data.")
-    parser.add_argument("--raw-bin", type=Path, default=default_raw_bin, help="Path to selfplay_data.bin")
-    parser.add_argument("--feature-bin", type=Path, default=default_feature_bin, help="Path to selfplay_features.bin")
-    parser.add_argument("--mix-raw-bins", type=str, default=None, help="Comma-separated raw bin list for mixed training")
-    parser.add_argument("--mix-feature-bins", type=str, default=None, help="Comma-separated feature bin list (file mode only)")
-    parser.add_argument("--mix-weights", type=str, default=None, help="Comma-separated mix weights, e.g. 0.3,0.7")
-    parser.add_argument("--samples-per-epoch", type=int, default=0, help="When mixing, sampled examples per epoch (0 means total mixed size)")
-    parser.add_argument("--converter", type=Path, default=default_converter, help="Path to C++ converter executable")
-    parser.add_argument("--nnue-out", type=Path, default=default_nnue_out, help="Output path for exported nnue.bin")
-    parser.add_argument("--convert-mode", choices=["pipe", "file"], default="file",
-                        help="pipe: convert in-memory (no feature file); file: write/read selfplay_features.bin")
-    parser.add_argument("--epochs", type=int, default=50, help="Total training epochs")
-    parser.add_argument("--checkpoint", type=Path, default=repo_root / "train_last.ckpt", help="Checkpoint path")
-    parser.add_argument("--save-every", type=int, default=5, help="Save checkpoint every N epochs (<=0 disables periodic saves)")
-    parser.add_argument("--resume", action="store_true", help="Resume training from --checkpoint")
-    parser.add_argument("--export-only", action="store_true",
-                        help="Load --checkpoint and export nnue.bin without running training")
-    parser.add_argument("--skip-convert", action="store_true", help="Skip calling C++ converter before training")
-    parser.add_argument("--force-convert", action="store_true", help="Force conversion even if feature file looks up-to-date")
-    parser.add_argument("--train-target", choices=["score", "wdl"], default="score",
-                        help="score: regress engine score directly; wdl: blended win-probability distillation")
-    parser.add_argument("--score-loss", choices=["smoothl1", "mse"], default="smoothl1",
-                        help="Regression loss when --train-target=score")
-    parser.add_argument("--blend-lambda", type=float, default=0.1,
-                        help="Blended loss lambda: 0=pure distillation, 1=pure outcome, used only in --train-target=wdl")
-    parser.add_argument("--score-scale", type=float, default=500.0,
-                        help="Normalization divisor for score regression, or sigmoid divisor for WDL mode")
-    parser.add_argument("--score-clip", type=float, default=2000.0,
-                        help="Clamp teacher scores before regression (0 disables clipping)")
-    parser.add_argument("--output-scale", type=float, default=0.0,
-                        help="Engine score units per network output at export time (default: score-scale)")
-    parser.add_argument("--augment-d8", action=argparse.BooleanOptionalAction, default=True,
-                        help="Apply one random D8 symmetry per batch (default: on)")
-    parser.add_argument("--batch-size", type=int, default=16384, help="Batch size for training")
-    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+    parser = argparse.ArgumentParser(description="Train AmazonsNNUE-v2 from selfplay data.")
+    parser.add_argument("--raw-bin", type=Path, default=default_raw_bin)
+    parser.add_argument("--feature-bin", type=Path, default=default_feature_bin)
+    parser.add_argument("--mix-raw-bins", type=str, default=None)
+    parser.add_argument("--mix-feature-bins", type=str, default=None)
+    parser.add_argument("--mix-weights", type=str, default=None)
+    parser.add_argument("--samples-per-epoch", type=int, default=0)
+    parser.add_argument("--converter", type=Path, default=default_converter)
+    parser.add_argument("--nnue-out", type=Path, default=default_nnue_out)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--checkpoint", type=Path, default=repo_root / "train_v2_last.ckpt")
+    parser.add_argument("--save-every", type=int, default=5)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--export-only", action="store_true")
+    parser.add_argument("--skip-convert", action="store_true")
+    parser.add_argument("--force-convert", action="store_true")
+    parser.add_argument("--score-scale", type=float, default=500.0)
+    parser.add_argument("--score-clip", type=float, default=2000.0)
+    parser.add_argument("--output-scale", type=float, default=0.0)
+    parser.add_argument("--wdl-loss-weight", type=float, default=0.0)
+    parser.add_argument("--residual-loss-weight", type=float, default=0.25)
+    parser.add_argument("--augment-d8", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--batch-size", type=int, default=8192)
+    parser.add_argument("--lr", type=float, default=0.001)
     args = parser.parse_args()
 
     mix_raw_values = parse_csv_arg(args.mix_raw_bins)
     mix_feature_values = parse_csv_arg(args.mix_feature_bins)
     mix_weights = parse_weight_list(args.mix_weights)
 
-    mix_raw_bin_paths = None
+    mix_raw_bin_paths = [Path(v).resolve() for v in mix_raw_values] if mix_raw_values else None
     mix_feature_bin_paths = None
-    if mix_raw_values:
-        mix_raw_bin_paths = [Path(value).resolve() for value in mix_raw_values]
-
+    if mix_raw_bin_paths:
         if mix_feature_values:
             if len(mix_feature_values) != len(mix_raw_bin_paths):
-                raise ValueError("--mix-feature-bins count must match --mix-raw-bins count")
-            mix_feature_bin_paths = [Path(value).resolve() for value in mix_feature_values]
+                raise ValueError("--mix-feature-bins count must match --mix-raw-bins")
+            mix_feature_bin_paths = [Path(v).resolve() for v in mix_feature_values]
         else:
-            mix_feature_bin_paths = [default_feature_path_for_raw(path) for path in mix_raw_bin_paths]
+            mix_feature_bin_paths = [path.with_suffix(".features_v2.bin") for path in mix_raw_bin_paths]
 
-        if mix_weights is not None and len(mix_weights) != len(mix_raw_bin_paths):
-            raise ValueError("--mix-weights count must match --mix-raw-bins count")
-
-    try:
-        train(
-            raw_bin_path=args.raw_bin,
-            nnue_out_path=args.nnue_out,
-            epochs=args.epochs,
-            checkpoint_path=args.checkpoint,
-            save_every=args.save_every,
-            resume=args.resume,
-            export_only=args.export_only,
-            mix_raw_bin_paths=mix_raw_bin_paths,
-            mix_feature_bin_paths=mix_feature_bin_paths,
-            mix_weights=mix_weights,
-            samples_per_epoch=args.samples_per_epoch,
-            train_target=args.train_target,
-            score_loss=args.score_loss,
-            blend_lambda=args.blend_lambda,
-            score_scale=args.score_scale,
-            score_clip=args.score_clip,
-            output_scale=args.output_scale,
-            augment_d8=args.augment_d8,
-            batch_size=args.batch_size,
-            lr=args.lr,
-        )
-    except RuntimeError as exc:
-        print(f"Error: {exc}")
+    train(
+        raw_bin_path=args.raw_bin.resolve(),
+        feature_bin_path=args.feature_bin.resolve(),
+        converter_path=args.converter.resolve(),
+        nnue_out_path=args.nnue_out.resolve(),
+        epochs=args.epochs,
+        checkpoint_path=args.checkpoint.resolve() if args.checkpoint else None,
+        save_every=args.save_every,
+        resume=args.resume,
+        export_only=args.export_only,
+        mix_raw_bin_paths=mix_raw_bin_paths,
+        mix_feature_bin_paths=mix_feature_bin_paths,
+        mix_weights=mix_weights,
+        samples_per_epoch=args.samples_per_epoch,
+        skip_convert=args.skip_convert,
+        force_convert=args.force_convert,
+        score_scale=args.score_scale,
+        score_clip=args.score_clip,
+        output_scale=args.output_scale,
+        wdl_loss_weight=args.wdl_loss_weight,
+        residual_loss_weight=args.residual_loss_weight,
+        augment_d8=args.augment_d8,
+        batch_size=args.batch_size,
+        lr=args.lr,
+    )

@@ -318,10 +318,14 @@ class EngineProcess:
             self.set_option(name, value)
 
         mode = self.query_eval_mode()
-        expected_mode = "NNUE" if self.config.use_nnue and self.config.eval_file is not None else "Classical"
-        if mode != expected_mode:
+        expected_nnue = self.config.use_nnue and self.config.eval_file is not None
+        if expected_nnue and "NNUE" not in mode:
             raise EngineProtocolError(
-                f"{self.label}: expected eval mode {expected_mode}, got {mode}"
+                f"{self.label}: expected an NNUE eval mode, got {mode}"
+            )
+        if not expected_nnue and mode != "Classical":
+            raise EngineProtocolError(
+                f"{self.label}: expected eval mode Classical, got {mode}"
             )
 
     def query_eval_mode(self) -> str:

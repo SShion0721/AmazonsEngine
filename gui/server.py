@@ -194,7 +194,7 @@ def get_engine_runtime_state() -> dict:
             except ValueError:
                 pass
 
-    state['nnue_active'] = state['mode'] == 'NNUE'
+    state['nnue_active'] = 'NNUE' in state['mode']
     return state
 
 

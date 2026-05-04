@@ -22,7 +22,7 @@ bool g_use_strong_classical = true;
 namespace {
 
 constexpr int DIST_INF = 127;
-constexpr int EVAL_CACHE_SIZE = 1 << 15;
+constexpr int EVAL_CACHE_SIZE = 1 << 20;
 constexpr int EVAL_CACHE_MASK = EVAL_CACHE_SIZE - 1;
 
 struct DistanceInfo {
@@ -33,10 +33,10 @@ struct DistanceInfo {
 struct EvalCacheEntry {
     uint64_t key = 0;
     bool valid = false;
-    EvalBreakdown breakdown{};
+    EvalInfo info{};
 };
 
-std::array<EvalCacheEntry, EVAL_CACHE_SIZE> g_eval_cache;
+alignas(64) std::array<EvalCacheEntry, EVAL_CACHE_SIZE> g_eval_cache;
 
 static Score clamp_static_eval(Score value) {
     return std::clamp(value, -SCORE_INF + 1, SCORE_INF - 1);
@@ -49,6 +49,16 @@ static int phase_bucket(int arrows) {
     if (arrows <= 55) return 3;
     if (arrows <= 63) return 4;
     return 5;
+}
+
+static int fusion_phase_bucket(int arrows) {
+    return std::clamp(arrows / 12, 0, NNUE::PHASE_BUCKETS - 1);
+}
+
+static int8_t scaled_i8(int value, int divisor = 1) {
+    if (divisor > 1)
+        value /= divisor;
+    return static_cast<int8_t>(std::clamp(value, -127, 127));
 }
 
 struct EvalWeights {
@@ -258,6 +268,22 @@ static Score eval_enclosure_m(const Position& pos) {
     return (side_enclosure_score(pos, WHITE) - side_enclosure_score(pos, BLACK)) / 16;
 }
 
+static Score eval_mobility_fast(const Position& pos) {
+    const Bitboard128 occ = pos.bb_occupied;
+    int white_mob = 0;
+    int black_mob = 0;
+
+    for (int i = 0; i < NUM_AMAZONS; i++) {
+        const Square wsq = pos.amazons[WHITE][i];
+        white_mob += (get_queen_attacks(wsq, occ) & ~occ).popcount();
+
+        const Square bsq = pos.amazons[BLACK][i];
+        black_mob += (get_queen_attacks(bsq, occ) & ~occ).popcount();
+    }
+
+    return white_mob - black_mob;
+}
+
 static int simple_component_value(int empty_count, int amazon_count) {
     if (amazon_count <= 0)
         return 0;
@@ -310,12 +336,14 @@ static EvalBreakdown compute_classical2_breakdown(const Position& pos) {
     const DistanceInfo info = compute_distances(pos);
     EvalBreakdown out{};
     out.phase = pos.bb_arrow.popcount();
+    out.phase_bucket = fusion_phase_bucket(out.phase);
     out.t1 = eval_t1_queen_territory(pos, info);
     out.t2 = eval_t2_king_territory(pos, info);
     out.p1 = eval_p1_queen_position(pos, info);
     out.p2 = eval_p2_king_position(pos, info);
     out.m = eval_enclosure_m(pos);
     out.partition = eval_partition2(pos, &out.active_areas);
+    out.mobility = eval_mobility_fast(pos);
 
     const EvalWeights w = weights_by_phase(out.phase);
     out.raw_white = clamp_static_eval(w.t1 * out.t1
@@ -328,18 +356,53 @@ static EvalBreakdown compute_classical2_breakdown(const Position& pos) {
     return out;
 }
 
-static const EvalBreakdown& cached_classical2_breakdown(const Position& pos) {
+static GlobalFeatures make_global_features(const Position& pos, const EvalBreakdown& bd) {
+    GlobalFeatures gf{};
+    const int side_sign = pos.side_to_move == WHITE ? 1 : -1;
+    const int empty_count = (~pos.bb_occupied & BOARD_MASK_BB).popcount();
+
+    gf.v[0]  = static_cast<int8_t>(bd.phase_bucket);
+    gf.v[1]  = scaled_i8(bd.phase);
+    gf.v[2]  = scaled_i8(empty_count);
+    gf.v[3]  = scaled_i8(side_sign * bd.t1);
+    gf.v[4]  = scaled_i8(side_sign * bd.t2);
+    gf.v[5]  = scaled_i8(side_sign * bd.p1, 4);
+    gf.v[6]  = scaled_i8(side_sign * bd.p2, 4);
+    gf.v[7]  = scaled_i8(side_sign * bd.m);
+    gf.v[8]  = scaled_i8(side_sign * bd.partition);
+    gf.v[9]  = scaled_i8(side_sign * bd.mobility);
+    gf.v[10] = scaled_i8(bd.classical, 16);
+    gf.v[11] = scaled_i8(bd.raw_white * side_sign, 16);
+    gf.v[12] = static_cast<int8_t>(std::clamp(bd.active_areas * 16, 0, 127));
+    gf.v[13] = bd.active_areas == 0 ? 127 : 0;
+    gf.v[14] = static_cast<int8_t>(std::clamp((BOARD_SQ - empty_count) * 2, 0, 127));
+    return gf;
+}
+
+static EvalInfo compute_eval_info(const Position& pos) {
+    EvalInfo info{};
+    info.breakdown = compute_classical2_breakdown(pos);
+    info.phase_bucket = info.breakdown.phase_bucket;
+    info.global = make_global_features(pos, info.breakdown);
+    return info;
+}
+
+static const EvalInfo& cached_eval_info(const Position& pos) {
     EvalCacheEntry& entry = g_eval_cache[pos.key & EVAL_CACHE_MASK];
     if (!entry.valid || entry.key != pos.key) {
         entry.key = pos.key;
         entry.valid = true;
-        entry.breakdown = compute_classical2_breakdown(pos);
+        entry.info = compute_eval_info(pos);
     } else {
-        entry.breakdown.classical = pos.side_to_move == WHITE
-                                  ? entry.breakdown.raw_white
-                                  : -entry.breakdown.raw_white;
+        entry.info.breakdown.classical = pos.side_to_move == WHITE
+                                       ? entry.info.breakdown.raw_white
+                                       : -entry.info.breakdown.raw_white;
     }
-    return entry.breakdown;
+    return entry.info;
+}
+
+static const EvalBreakdown& cached_classical2_breakdown(const Position& pos) {
+    return cached_eval_info(pos).breakdown;
 }
 
 static Score eval_partition_legacy(const Position& pos) {
@@ -431,21 +494,7 @@ Score eval_territory(const Position& pos) {
 }
 
 Score eval_mobility(const Position& pos) {
-    Bitboard128 occ = pos.bb_occupied;
-    int white_mob = 0;
-    int black_mob = 0;
-
-    for (int i = 0; i < NUM_AMAZONS; i++) {
-        Square wsq = pos.amazons[WHITE][i];
-        Bitboard128 w_atk = get_queen_attacks(wsq, occ);
-        white_mob += (w_atk & ~occ).popcount();
-
-        Square bsq = pos.amazons[BLACK][i];
-        Bitboard128 b_atk = get_queen_attacks(bsq, occ);
-        black_mob += (b_atk & ~occ).popcount();
-    }
-
-    return white_mob - black_mob;
+    return eval_mobility_fast(pos);
 }
 
 Score evaluate_classical2(const Position& pos) {
@@ -462,11 +511,22 @@ bool get_eval_breakdown(const Position& pos, EvalBreakdown& out) {
     return true;
 }
 
+bool get_eval_info(const Position& pos, EvalInfo& out) {
+    out = cached_eval_info(pos);
+    return true;
+}
+
 Score evaluate(const Position& pos) {
-    const Score classical = evaluate_classical(pos);
+    const EvalInfo& info = cached_eval_info(pos);
+    const Score classical = g_use_strong_classical
+                          ? info.breakdown.classical
+                          : evaluate_classical_legacy(pos);
 
     if (g_use_nnue && g_nnue_loaded) {
-        Score nnue_eval = NNUE::evaluate_nnue(pos.side_to_move, pos.history[pos.ply].accumulator);
+        Score nnue_eval = NNUE::evaluate_nnue(pos.side_to_move,
+                                              pos.history[pos.ply].accumulator,
+                                              info.global.v,
+                                              info.phase_bucket);
         nnue_eval = clamp_static_eval(nnue_eval);
 
         if (g_use_pure_nnue)

@@ -18,9 +18,11 @@
 #pragma once
 #include "position.h"
 #include "tt.h"
+#include "movepicker.h"
 #include <atomic>
 #include <chrono>
 #include <array>
+#include <memory>
 
 extern bool g_use_null_move_pruning;
 extern bool g_use_lmp_pruning;
@@ -83,7 +85,11 @@ private:
 // 鈹€鈹€ Searcher 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 class Searcher {
 public:
-    explicit Searcher(TranspositionTable& tt) : tt_(tt) { init_tables(); }
+    explicit Searcher(TranspositionTable& tt)
+        : tt_(tt),
+          move_buffers_(std::make_unique<MovePickerBuffer[]>(128)) {
+        init_tables();
+    }
 
     // Main entry point: run iterative deepening and return the best move.
     Move search(Position& pos, int max_depth = 64, Score* out_score = nullptr, int thread_id = 0);
@@ -117,6 +123,7 @@ private:
     // Arrow history [color][amazon_to][arrow]. In Amazons the arrow square
     // often carries more tactical meaning than the amazon destination.
     int arrow_history_[2][BOARD_SQ][BOARD_SQ]{};
+    int from_arrow_history_[2][BOARD_SQ][BOARD_SQ]{};
 
     // 鈹€鈹€ LMR table [depth][move_index] 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     // Precomputed reduction amounts (mirrors SF's lmr[][]).
@@ -126,6 +133,7 @@ private:
     // The "best reply" to a given previous move. Tried right after
     // TT move and killers. Mirrors SF's Countermoves.
     Move countermoves_[2][BOARD_SQ][BOARD_SQ]{};
+    std::unique_ptr<MovePickerBuffer[]> move_buffers_;
 
     void init_tables();
 

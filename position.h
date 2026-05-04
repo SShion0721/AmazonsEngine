@@ -69,13 +69,7 @@ struct Position {
 
     // Count queen-reachable squares from sq (used in evaluation)
     int queen_reach(Square sq) const {
-        int count = 0;
-        for (int d = 0; d < 8; d++)
-            for (Square t : RAYS[sq][d]) {
-                if (board[t] != EMPTY) break;
-                ++count;
-            }
-        return count;
+        return (get_queen_attacks(sq, bb_occupied) & ~bb_occupied).popcount();
     }
 
     // 鈹€鈹€ Move execution 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€

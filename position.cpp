@@ -24,6 +24,49 @@ namespace Zobrist {
 // Map board cell value (1/2/3) → Zobrist index (0/1/2)
 static inline int piece_idx(int8_t cell) { return cell - 1; }
 
+namespace {
+
+void add_line_feature(NNUE::Accumulator& acc, Color p, uint8_t line, uint32_t code) {
+    const LineFeature f = line_feature(line, code);
+    const int16_t* weights = NNUE::g_weights.line_l0_weights[f.index];
+    if (f.sign > 0)
+        NNUE::acc_add_weights(acc.line[p], weights, NNUE::LINE_ACC_SIZE);
+    else
+        NNUE::acc_sub_weights(acc.line[p], weights, NNUE::LINE_ACC_SIZE);
+}
+
+void remove_line_feature(NNUE::Accumulator& acc, Color p, uint8_t line, uint32_t code) {
+    const LineFeature f = line_feature(line, code);
+    const int16_t* weights = NNUE::g_weights.line_l0_weights[f.index];
+    if (f.sign > 0)
+        NNUE::acc_sub_weights(acc.line[p], weights, NNUE::LINE_ACC_SIZE);
+    else
+        NNUE::acc_add_weights(acc.line[p], weights, NNUE::LINE_ACC_SIZE);
+}
+
+void update_line_square(NNUE::Accumulator& acc,
+                        Color p,
+                        Square sq,
+                        int8_t old_cell,
+                        int8_t new_cell) {
+    const uint32_t old_piece = line_cell_code(p, old_cell);
+    const uint32_t new_piece = line_cell_code(p, new_cell);
+    if (old_piece == new_piece)
+        return;
+
+    for (int k = 0; k < 4; ++k) {
+        const LineRef lr = SQ_LINES[sq][k];
+        uint32_t& code = acc.line_code[p][lr.line];
+
+        remove_line_feature(acc, p, lr.line, code);
+        code &= ~(3u << lr.shift);
+        code |= (new_piece << lr.shift);
+        add_line_feature(acc, p, lr.line, code);
+    }
+}
+
+} // namespace
+
 // ── set_startpos ─────────────────────────────────────────────────
 /*  Standard Game of the Amazons starting position:
  *
@@ -84,16 +127,29 @@ void Position::set_startpos() {
 // ── compute_accumulator ──────────────────────────────────────────
 void Position::compute_accumulator() {
     history[ply].accumulator.init();
+    auto& acc = history[ply].accumulator;
+
     for (int sq = 0; sq < BOARD_SQ; ++sq) {
         if (board[sq] != EMPTY) {
             int idx_w = NNUE::feature_index(WHITE, board[sq], sq);
             int idx_b = NNUE::feature_index(BLACK, board[sq], sq);
-            for (int i = 0; i < NNUE::ACC_SIZE; ++i) {
-                history[ply].accumulator.state[WHITE][i] += NNUE::g_weights.l0_weights[idx_w][i];
-                history[ply].accumulator.state[BLACK][i] += NNUE::g_weights.l0_weights[idx_b][i];
+            NNUE::acc_add_weights(acc.base[WHITE], NNUE::g_weights.base_l0_weights[idx_w], NNUE::BASE_ACC_SIZE);
+            NNUE::acc_add_weights(acc.base[BLACK], NNUE::g_weights.base_l0_weights[idx_b], NNUE::BASE_ACC_SIZE);
+
+            for (Color p : {WHITE, BLACK}) {
+                const uint32_t piece = line_cell_code(p, board[sq]);
+                for (int k = 0; k < 4; ++k) {
+                    const LineRef lr = SQ_LINES[sq][k];
+                    acc.line_code[p][lr.line] &= ~(3u << lr.shift);
+                    acc.line_code[p][lr.line] |= (piece << lr.shift);
+                }
             }
         }
     }
+
+    for (Color p : {WHITE, BLACK})
+        for (int line = 0; line < NUM_LINES; ++line)
+            add_line_feature(acc, p, static_cast<uint8_t>(line), acc.line_code[p][line]);
 }
 
 // ── do_move ──────────────────────────────────────────────────────
@@ -119,17 +175,23 @@ void Position::do_move(Move m) {
         int idx_w = NNUE::feature_index(WHITE, type, sq);
         int idx_b = NNUE::feature_index(BLACK, type, sq);
         if (sign == 1) {
-            NNUE::acc_add_weights(acc.state[WHITE], NNUE::g_weights.l0_weights[idx_w], NNUE::ACC_SIZE);
-            NNUE::acc_add_weights(acc.state[BLACK], NNUE::g_weights.l0_weights[idx_b], NNUE::ACC_SIZE);
+            NNUE::acc_add_weights(acc.base[WHITE], NNUE::g_weights.base_l0_weights[idx_w], NNUE::BASE_ACC_SIZE);
+            NNUE::acc_add_weights(acc.base[BLACK], NNUE::g_weights.base_l0_weights[idx_b], NNUE::BASE_ACC_SIZE);
         } else {
-            NNUE::acc_sub_weights(acc.state[WHITE], NNUE::g_weights.l0_weights[idx_w], NNUE::ACC_SIZE);
-            NNUE::acc_sub_weights(acc.state[BLACK], NNUE::g_weights.l0_weights[idx_b], NNUE::ACC_SIZE);
+            NNUE::acc_sub_weights(acc.base[WHITE], NNUE::g_weights.base_l0_weights[idx_w], NNUE::BASE_ACC_SIZE);
+            NNUE::acc_sub_weights(acc.base[BLACK], NNUE::g_weights.base_l0_weights[idx_b], NNUE::BASE_ACC_SIZE);
         }
     };
 
     update_feat(amazon_val, from, -1); // remove from
     update_feat(amazon_val, to,    1); // place to
     update_feat(ARROW,      arrow, 1); // place arrow
+
+    for (Color p : {WHITE, BLACK}) {
+        update_line_square(acc, p, from, amazon_val, EMPTY);
+        update_line_square(acc, p, to, EMPTY, amazon_val);
+        update_line_square(acc, p, arrow, EMPTY, ARROW);
+    }
 
     // --- 1. Update Zobrist key (incremental, like SF) ---
     key ^= Zobrist::piece_sq[piece_idx(amazon_val)][from];   // remove from 'from'

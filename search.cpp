@@ -53,8 +53,12 @@ inline Score score_from_tt(Score score, int ply) {
     return score;
 }
 
-inline void add_history_score(int& entry, int delta) {
-    entry = std::clamp(entry + delta, -32768, 32767);
+constexpr int HISTORY_MAX = 16384;
+
+inline void update_history_score(int& entry, int delta) {
+    delta = std::clamp(delta, -HISTORY_MAX, HISTORY_MAX);
+    entry += delta - entry * std::abs(delta) / HISTORY_MAX;
+    entry = std::clamp(entry, -HISTORY_MAX, HISTORY_MAX);
 }
 
 int candidate_cap(int phase, int depth, bool is_root, bool is_pv) {
@@ -101,8 +105,9 @@ void Searcher::update_histories(Move m, int depth, Stack* ss, Color us) {
     }
 
     const int bonus = depth * depth * 64;
-    add_history_score(history_[us][move_from(m)][move_to(m)], bonus);
-    add_history_score(arrow_history_[us][move_to(m)][move_arrow(m)], bonus);
+    update_history_score(history_[us][move_from(m)][move_to(m)], bonus);
+    update_history_score(arrow_history_[us][move_to(m)][move_arrow(m)], bonus);
+    update_history_score(from_arrow_history_[us][move_from(m)][move_arrow(m)], bonus);
 
     const Move prev = (ss - 1)->current_move;
     if (prev != MOVE_NONE)
@@ -207,7 +212,15 @@ Score Searcher::negamax(Position& pos, Score alpha, Score beta, int depth, Stack
     if (prev != MOVE_NONE)
         countermove = countermoves_[pos.side_to_move][move_from(prev)][move_to(prev)];
 
-    MovePicker picker(pos, tt_move, ss, history_, arrow_history_, countermove);
+    MovePicker picker(pos,
+                      tt_move,
+                      ss,
+                      history_,
+                      arrow_history_,
+                      from_arrow_history_,
+                      countermove,
+                      move_buffers_[std::min(ss->ply, 127)],
+                      lmp_threshold);
     Move m;
     while ((m = picker.next_move()) != MOVE_NONE) {
         ++move_count;
@@ -243,7 +256,8 @@ Score Searcher::negamax(Position& pos, Score alpha, Score beta, int depth, Stack
                     reduction = std::max(0, reduction - 1);
 
                 const int h_score = history_[us][move_from(m)][move_to(m)]
-                                  + arrow_history_[us][move_to(m)][move_arrow(m)];
+                                  + arrow_history_[us][move_to(m)][move_arrow(m)]
+                                  + from_arrow_history_[us][move_from(m)][move_arrow(m)];
                 if (h_score > 4000 || category_score > 3000)
                     reduction = std::max(0, reduction - 1);
                 else if (h_score < -4000 || category_score < -1500)
@@ -282,13 +296,17 @@ Score Searcher::negamax(Position& pos, Score alpha, Score beta, int depth, Stack
                     update_histories(m, depth, ss, pos.side_to_move);
 
                     const int malus = -(depth * depth);
-                    for (Move tried : picker.tried_moves()) {
+                    const Move* tried_moves = picker.tried_moves();
+                    for (int i = 0; i < picker.tried_count(); ++i) {
+                        const Move tried = tried_moves[i];
                         if (tried == m)
                             break;
-                        add_history_score(history_[pos.side_to_move][move_from(tried)][move_to(tried)],
-                                          malus * 64);
-                        add_history_score(arrow_history_[pos.side_to_move][move_to(tried)][move_arrow(tried)],
-                                          malus * 64);
+                        update_history_score(history_[pos.side_to_move][move_from(tried)][move_to(tried)],
+                                             malus * 64);
+                        update_history_score(arrow_history_[pos.side_to_move][move_to(tried)][move_arrow(tried)],
+                                             malus * 64);
+                        update_history_score(from_arrow_history_[pos.side_to_move][move_from(tried)][move_arrow(tried)],
+                                             malus * 64);
                     }
                     break;
                 }
@@ -314,6 +332,7 @@ Move Searcher::search(Position& pos, int max_depth, Score* out_score, int thread
     killers_ = {};
     std::fill(&history_[0][0][0], &history_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
     std::fill(&arrow_history_[0][0][0], &arrow_history_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
+    std::fill(&from_arrow_history_[0][0][0], &from_arrow_history_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
     std::memset(countermoves_, 0, sizeof(countermoves_));
 
     if (thread_id == 0)

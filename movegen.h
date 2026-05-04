@@ -23,9 +23,12 @@
 #include "position.h"
 #include <vector>
 
+constexpr int MAX_LEGAL_MOVES = 8192;
+
 // Generate all legal moves for the side to move.
 // Appends to 'moves' (caller must pass an empty or pre-sized vector).
 void generate_moves(const Position& pos, std::vector<Move>& moves);
+int generate_moves(const Position& pos, Move* moves, int max_moves);
 
 // Returns true if the side to move has at least one legal move.
 // Slightly faster than generate_moves() for the terminal check.

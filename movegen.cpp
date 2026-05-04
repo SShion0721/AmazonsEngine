@@ -13,6 +13,13 @@
 void generate_moves(const Position& pos, std::vector<Move>& moves) {
     moves.clear();
     moves.reserve(2048);
+    Move buffer[MAX_LEGAL_MOVES];
+    const int count = generate_moves(pos, buffer, MAX_LEGAL_MOVES);
+    moves.insert(moves.end(), buffer, buffer + count);
+}
+
+int generate_moves(const Position& pos, Move* moves, int max_moves) {
+    int count = 0;
 
     const Color  us = pos.side_to_move;
     Bitboard128  occ = pos.bb_occupied;
@@ -45,7 +52,10 @@ void generate_moves(const Position& pos, std::vector<Move>& moves) {
             Bitboard128 arrow_iter = arrow_set;
             while (arrow_iter) {
                 Square arrow = arrow_iter.pop_lsb();
-                moves.push_back(encode_move(from, to, arrow));
+                if (count < max_moves)
+                    moves[count++] = encode_move(from, to, arrow);
+                else
+                    assert(false && "MAX_LEGAL_MOVES too small");
             }
 
             // Remove amazon from 'to' for next iteration
@@ -55,6 +65,7 @@ void generate_moves(const Position& pos, std::vector<Move>& moves) {
         // Step 4: Restore amazon at 'from'
         occ.set(from);
     }
+    return count;
 }
 
 bool has_legal_move(const Position& pos) {
