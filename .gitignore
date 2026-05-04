@@ -28,6 +28,11 @@ env/
 # Logs and temporary files
 *.log
 compile_errors.txt
+# Nested repositories
+Amazon/
+nnue-pytorch/
+Stockfish/
+WDL_model/
 _refs/
 
 # OS files
