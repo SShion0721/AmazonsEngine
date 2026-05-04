@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C++ Build directories
+build/
+bin/
+obj/
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Python Virtual Environment
+.venv/
+venv/
+env/
+
+# Large Model weights and checkpoints (Usually too big for Git)
+*.ckpt
+*.bin
+*.pt
+*.pth
+*.h5
+
+# Logs and temporary files
+*.log
+compile_errors.txt
+_refs/
+
+# OS files
+.DS_Store
+Thumbs.db
