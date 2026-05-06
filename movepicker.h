@@ -11,9 +11,14 @@
 
 struct Stack;
 
+extern bool g_use_bounded_movegen;
+extern int g_bounded_dest_cap;
+extern int g_bounded_arrow_cap;
+
 struct ScoredMove {
     Move move;
     int score;
+    int category;
 };
 
 struct MovePickerBuffer {
@@ -48,6 +53,8 @@ public:
 
     const Move* tried_moves() const { return buffer_.tried; }
     int tried_count() const { return tried_count_; }
+    int last_category_score() const { return last_category_score_; }
+    bool last_category_known() const { return last_category_known_; }
 
 private:
     enum Stage {
@@ -73,12 +80,24 @@ private:
     int move_count_ = 0;
     int move_idx_ = 0;
     int tried_count_ = 0;
+    int excluded_count_ = 0;
+    Move excluded_[4] = {MOVE_NONE, MOVE_NONE, MOVE_NONE, MOVE_NONE};
+    int last_category_score_ = 0;
+    bool last_category_known_ = false;
 
-    bool already_tried(Move m) const {
-        for (int i = 0; i < tried_count_; ++i)
-            if (buffer_.tried[i] == m)
+    bool is_excluded(Move m) const {
+        for (int i = 0; i < excluded_count_; ++i)
+            if (excluded_[i] == m)
                 return true;
         return false;
+    }
+
+    void remember_special(Move m) {
+        if (excluded_count_ < 4)
+            excluded_[excluded_count_++] = m;
+        remember_tried(m);
+        last_category_known_ = false;
+        last_category_score_ = 0;
     }
 
     void remember_tried(Move m) {

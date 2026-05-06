@@ -24,6 +24,7 @@ void init_engine_tables() {
     init_between_line_bb();
     init_line_patterns();
     NNUE::init_random_weights();
+    NNUE::g_accumulator_enabled = true;
     clear_eval_cache();
 }
 

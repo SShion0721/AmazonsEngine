@@ -60,6 +60,7 @@ add_executable(bench_refactor
     position.cpp
     movegen.cpp
     movepicker.cpp
+    search.cpp
     evaluate.cpp
     nnue/nnue.cpp
 )

@@ -24,6 +24,7 @@ void init_engine_tables() {
     init_between_line_bb();
     init_line_patterns();
     NNUE::init_random_weights();
+    NNUE::g_accumulator_enabled = true;
     clear_eval_cache();
 }
 
@@ -79,19 +80,31 @@ int main() {
         }
     });
 
-    constexpr int EVAL_HIT_ITERS = 5000;
+    constexpr int EVAL_FAST_ITERS = 5000;
     g_use_nnue = false;
-    const double eval_hit_ms = time_ms([&] {
-        for (int i = 0; i < EVAL_HIT_ITERS; ++i)
-            sink += static_cast<std::uint64_t>(evaluate(*pos) + 32768);
+    g_use_strong_classical = true;
+    g_eval_tier = EVAL_TIER_FAST;
+    const double eval_fast_ms = time_ms([&] {
+        for (int i = 0; i < EVAL_FAST_ITERS; ++i)
+            sink += static_cast<std::uint64_t>(evaluate_with_tier(*pos, EVAL_TIER_FAST) + 32768);
     });
 
-    constexpr int EVAL_MISS_ITERS = 500;
+    constexpr int EVAL_STRONG_HIT_ITERS = 5000;
+    g_eval_tier = EVAL_TIER_STRONG;
+    clear_eval_cache();
+    sink += static_cast<std::uint64_t>(evaluate_with_tier(*pos, EVAL_TIER_STRONG) + 32768);
+    const double eval_strong_hit_ms = time_ms([&] {
+        for (int i = 0; i < EVAL_STRONG_HIT_ITERS; ++i)
+            sink += static_cast<std::uint64_t>(evaluate_with_tier(*pos, EVAL_TIER_STRONG) + 32768);
+    });
+
+    constexpr int EVAL_STRONG_MISS_ITERS = 500;
     const uint64_t base_key = pos->key;
-    const double eval_miss_ms = time_ms([&] {
-        for (int i = 0; i < EVAL_MISS_ITERS; ++i) {
+    clear_eval_cache();
+    const double eval_strong_miss_ms = time_ms([&] {
+        for (int i = 0; i < EVAL_STRONG_MISS_ITERS; ++i) {
             pos->key = base_key ^ (0x9E3779B97F4A7C15ULL * static_cast<uint64_t>(i + 1));
-            sink += static_cast<std::uint64_t>(evaluate(*pos) + 32768);
+            sink += static_cast<std::uint64_t>(evaluate_with_tier(*pos, EVAL_TIER_STRONG) + 32768);
         }
     });
     pos->key = base_key;
@@ -114,10 +127,12 @@ int main() {
               << " per_call_us " << (movegen_ms * 1000.0 / MOVEGEN_ITERS) << "\n";
     std::cout << "movepicker_ms " << picker_ms
               << " per_call_us " << (picker_ms * 1000.0 / PICKER_ITERS) << "\n";
-    std::cout << "evaluate_cache_hit_ms " << eval_hit_ms
-              << " per_call_us " << (eval_hit_ms * 1000.0 / EVAL_HIT_ITERS) << "\n";
-    std::cout << "evaluate_cache_miss_ms " << eval_miss_ms
-              << " per_call_us " << (eval_miss_ms * 1000.0 / EVAL_MISS_ITERS) << "\n";
+    std::cout << "evaluate_fast_ms " << eval_fast_ms
+              << " per_call_us " << (eval_fast_ms * 1000.0 / EVAL_FAST_ITERS) << "\n";
+    std::cout << "evaluate_strong_cache_hit_ms " << eval_strong_hit_ms
+              << " per_call_us " << (eval_strong_hit_ms * 1000.0 / EVAL_STRONG_HIT_ITERS) << "\n";
+    std::cout << "evaluate_strong_cache_miss_ms " << eval_strong_miss_ms
+              << " per_call_us " << (eval_strong_miss_ms * 1000.0 / EVAL_STRONG_MISS_ITERS) << "\n";
     std::cout << "nnue_forward_ms " << nnue_ms
               << " per_call_us " << (nnue_ms * 1000.0 / NNUE_ITERS) << "\n";
     std::cout << "sink " << sink << "\n";

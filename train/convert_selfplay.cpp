@@ -57,7 +57,6 @@ void init_engine_tables() {
     init_attack_tables();
     init_between_line_bb();
     init_line_patterns();
-    NNUE::init_random_weights();
 }
 
 bool build_position(const GameRecord& src, Position& pos) {
@@ -108,7 +107,6 @@ bool build_position(const GameRecord& src, Position& pos) {
         pos.key ^= Zobrist::side;
 
     pos.bb_occupied = pos.bb_white | pos.bb_black | pos.bb_arrow;
-    pos.compute_accumulator();
     return true;
 }
 

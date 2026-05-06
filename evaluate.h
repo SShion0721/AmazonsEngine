@@ -49,11 +49,22 @@ extern bool g_use_residual_nnue;
 extern bool g_use_pure_nnue;
 extern bool g_use_strong_classical;
 
+enum EvalTier {
+    EVAL_TIER_FAST = 0,
+    EVAL_TIER_MIXED = 1,
+    EVAL_TIER_STRONG = 2
+};
+
+extern int g_eval_tier;
+
 // Sub-components exposed for debug/tuning.
 Score eval_territory(const Position& pos); // legacy king flood territory, white POV
 Score eval_mobility (const Position& pos); // queen mobility, white POV
 bool get_eval_breakdown(const Position& pos, EvalBreakdown& out);
 bool get_eval_info(const Position& pos, EvalInfo& out);
+bool partition_fast_track(const Position& pos, Score& out);
+Score evaluate_with_tier(const Position& pos, int tier);
+Score evaluate_search(const Position& pos, bool is_pv, bool is_root, int depth, Score alpha, Score beta);
 
 // Clear the eval cache (call on ucinewgame / option changes).
 void clear_eval_cache();

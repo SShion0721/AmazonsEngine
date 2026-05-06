@@ -17,9 +17,11 @@ public:
     void start_searching(std::shared_ptr<Position> root,
                          const TimeManager& time_manager,
                          int max_depth,
-                         int thread_id);
+                         int thread_id,
+                         uint64_t node_limit);
     void request_stop();
     void wait_for_search_finished();
+    void new_game();
     void shutdown();
 
 private:
@@ -36,6 +38,7 @@ private:
     TimeManager time_manager_;
     int max_depth_ = 64;
     int thread_id_ = 0;
+    uint64_t node_limit_ = 0;
 };
 
 class SearchThreadPool {
@@ -46,9 +49,11 @@ public:
     void resize(int helper_count);
     void start_searching(const Position& root,
                          const TimeManager& time_manager,
-                         int max_depth);
+                         int max_depth,
+                         uint64_t node_limit = 0);
     void request_stop();
     void wait_for_search_finished();
+    void new_game();
     void shutdown();
     int size() const;
 

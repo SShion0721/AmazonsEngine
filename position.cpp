@@ -121,7 +121,8 @@ void Position::set_startpos() {
     }
     bb_occupied = bb_white | bb_black | bb_arrow;
     
-    compute_accumulator();
+    if (NNUE::accumulator_enabled())
+        compute_accumulator();
 }
 
 // ── compute_accumulator ──────────────────────────────────────────
@@ -167,30 +168,32 @@ void Position::do_move(Move m) {
     // Save state for undo
     history[ply].key = key;
 
-    // --- 0. Update NNUE Accumulator incrementally (SIMD-accelerated) ---
-    history[ply + 1].accumulator = history[ply].accumulator;
-    auto& acc = history[ply + 1].accumulator;
-    
-    auto update_feat = [&](int8_t type, Square sq, int sign) {
-        int idx_w = NNUE::feature_index(WHITE, type, sq);
-        int idx_b = NNUE::feature_index(BLACK, type, sq);
-        if (sign == 1) {
-            NNUE::acc_add_weights(acc.base[WHITE], NNUE::g_weights.base_l0_weights[idx_w], NNUE::BASE_ACC_SIZE);
-            NNUE::acc_add_weights(acc.base[BLACK], NNUE::g_weights.base_l0_weights[idx_b], NNUE::BASE_ACC_SIZE);
-        } else {
-            NNUE::acc_sub_weights(acc.base[WHITE], NNUE::g_weights.base_l0_weights[idx_w], NNUE::BASE_ACC_SIZE);
-            NNUE::acc_sub_weights(acc.base[BLACK], NNUE::g_weights.base_l0_weights[idx_b], NNUE::BASE_ACC_SIZE);
+    // --- 0. Update NNUE Accumulator incrementally only when inference needs it. ---
+    if (NNUE::accumulator_enabled()) {
+        history[ply + 1].accumulator = history[ply].accumulator;
+        auto& acc = history[ply + 1].accumulator;
+
+        auto update_feat = [&](int8_t type, Square sq, int sign) {
+            int idx_w = NNUE::feature_index(WHITE, type, sq);
+            int idx_b = NNUE::feature_index(BLACK, type, sq);
+            if (sign == 1) {
+                NNUE::acc_add_weights(acc.base[WHITE], NNUE::g_weights.base_l0_weights[idx_w], NNUE::BASE_ACC_SIZE);
+                NNUE::acc_add_weights(acc.base[BLACK], NNUE::g_weights.base_l0_weights[idx_b], NNUE::BASE_ACC_SIZE);
+            } else {
+                NNUE::acc_sub_weights(acc.base[WHITE], NNUE::g_weights.base_l0_weights[idx_w], NNUE::BASE_ACC_SIZE);
+                NNUE::acc_sub_weights(acc.base[BLACK], NNUE::g_weights.base_l0_weights[idx_b], NNUE::BASE_ACC_SIZE);
+            }
+        };
+
+        update_feat(amazon_val, from, -1); // remove from
+        update_feat(amazon_val, to,    1); // place to
+        update_feat(ARROW,      arrow, 1); // place arrow
+
+        for (Color p : {WHITE, BLACK}) {
+            update_line_square(acc, p, from, amazon_val, EMPTY);
+            update_line_square(acc, p, to, EMPTY, amazon_val);
+            update_line_square(acc, p, arrow, EMPTY, ARROW);
         }
-    };
-
-    update_feat(amazon_val, from, -1); // remove from
-    update_feat(amazon_val, to,    1); // place to
-    update_feat(ARROW,      arrow, 1); // place arrow
-
-    for (Color p : {WHITE, BLACK}) {
-        update_line_square(acc, p, from, amazon_val, EMPTY);
-        update_line_square(acc, p, to, EMPTY, amazon_val);
-        update_line_square(acc, p, arrow, EMPTY, ARROW);
     }
 
     // --- 1. Update Zobrist key (incremental, like SF) ---
@@ -263,8 +266,9 @@ void Position::do_null_move() {
     // Save state for undo
     history[ply].key = key;
 
-    // Copy accumulator forward (no features change)
-    history[ply + 1].accumulator = history[ply].accumulator;
+    // Copy accumulator forward only when it is active.
+    if (NNUE::accumulator_enabled())
+        history[ply + 1].accumulator = history[ply].accumulator;
 
     // Flip side and update hash
     key ^= Zobrist::side;

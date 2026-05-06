@@ -14,13 +14,15 @@ SearchThread::~SearchThread() {
 void SearchThread::start_searching(std::shared_ptr<Position> root,
                                    const TimeManager& time_manager,
                                    int max_depth,
-                                   int thread_id) {
+                                   int thread_id,
+                                   uint64_t node_limit) {
     std::unique_lock<std::mutex> lock(mutex_);
     cv_.wait(lock, [&] { return !searching_ && !job_ready_; });
     root_pos_ = std::move(root);
     time_manager_ = time_manager;
     max_depth_ = max_depth;
     thread_id_ = thread_id;
+    node_limit_ = node_limit;
     job_ready_ = true;
     lock.unlock();
     cv_.notify_one();
@@ -33,6 +35,12 @@ void SearchThread::request_stop() {
 void SearchThread::wait_for_search_finished() {
     std::unique_lock<std::mutex> lock(mutex_);
     cv_.wait(lock, [&] { return !searching_ && !job_ready_; });
+}
+
+void SearchThread::new_game() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!searching_ && !job_ready_)
+        searcher_.new_game();
 }
 
 void SearchThread::shutdown() {
@@ -60,12 +68,14 @@ void SearchThread::idle_loop() {
         TimeManager time_manager = time_manager_;
         int max_depth = max_depth_;
         int thread_id = thread_id_;
+        uint64_t node_limit = node_limit_;
         job_ready_ = false;
         searching_ = true;
         lock.unlock();
 
         searcher_.silent = true;
         searcher_.time_man = time_manager;
+        searcher_.node_limit = node_limit;
         searcher_.search(*root, max_depth, nullptr, thread_id);
 
         lock.lock();
@@ -98,10 +108,11 @@ void SearchThreadPool::resize(int helper_count) {
 
 void SearchThreadPool::start_searching(const Position& root,
                                        const TimeManager& time_manager,
-                                       int max_depth) {
+                                       int max_depth,
+                                       uint64_t node_limit) {
     for (std::size_t i = 0; i < threads_.size(); ++i) {
         threads_[i]->start_searching(
-            std::make_shared<Position>(root), time_manager, max_depth, static_cast<int>(i) + 1);
+            std::make_shared<Position>(root), time_manager, max_depth, static_cast<int>(i) + 1, node_limit);
     }
 }
 
@@ -113,6 +124,11 @@ void SearchThreadPool::request_stop() {
 void SearchThreadPool::wait_for_search_finished() {
     for (auto& thread : threads_)
         thread->wait_for_search_finished();
+}
+
+void SearchThreadPool::new_game() {
+    for (auto& thread : threads_)
+        thread->new_game();
 }
 
 void SearchThreadPool::shutdown() {

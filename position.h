@@ -51,7 +51,7 @@ struct Position {
 
     // Undo stack
     // Amazons games can run much longer than chess-like search plies.
-    static constexpr int MAX_PLY = 2048;
+    static constexpr int MAX_PLY = 256;
     UndoInfo history[MAX_PLY];
 
     // 鈹€鈹€ Setup 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€

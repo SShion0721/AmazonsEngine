@@ -21,6 +21,7 @@
 namespace NNUE {
 
 NetworkParameters g_weights;
+bool g_accumulator_enabled = false;
 
 namespace {
 

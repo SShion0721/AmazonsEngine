@@ -14,7 +14,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
-#include <vector>
 
 bool g_use_null_move_pruning = false;
 bool g_use_lmp_pruning = true;
@@ -62,24 +61,26 @@ inline void update_history_score(int& entry, int delta) {
 }
 
 int candidate_cap(int phase, int depth, bool is_root, bool is_pv) {
-    if (is_root || is_pv || phase >= 56)
+    if (phase >= 56)
         return 1000000;
 
+    const int pv_bonus = (is_root || is_pv) ? 96 : 0;
+
     if (phase < 14) {
-        if (depth <= 2) return 80;
-        if (depth <= 4) return 160;
-        return 256;
+        if (depth <= 2) return 80 + pv_bonus;
+        if (depth <= 4) return 160 + pv_bonus;
+        return 256 + pv_bonus;
     }
 
     if (phase < 40) {
-        if (depth <= 2) return 120;
-        if (depth <= 4) return 220;
-        return 360;
+        if (depth <= 2) return 120 + pv_bonus;
+        if (depth <= 4) return 220 + pv_bonus;
+        return 360 + pv_bonus;
     }
 
-    if (depth <= 2) return 180;
-    if (depth <= 4) return 320;
-    return 520;
+    if (depth <= 2) return 180 + pv_bonus;
+    if (depth <= 4) return 320 + pv_bonus;
+    return 520 + pv_bonus;
 }
 
 } // namespace
@@ -96,6 +97,13 @@ void Searcher::init_tables() {
 void Searcher::check_time() {
     if (time_man.hard_stop())
         stop_.store(true, std::memory_order_relaxed);
+}
+
+void Searcher::new_game() {
+    std::fill(&history_[0][0][0], &history_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
+    std::fill(&arrow_history_[0][0][0], &arrow_history_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
+    std::fill(&from_arrow_history_[0][0][0], &from_arrow_history_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
+    std::memset(countermoves_, 0, sizeof(countermoves_));
 }
 
 void Searcher::update_histories(Move m, int depth, Stack* ss, Color us) {
@@ -115,7 +123,10 @@ void Searcher::update_histories(Move m, int depth, Stack* ss, Color us) {
 }
 
 Score Searcher::negamax(Position& pos, Score alpha, Score beta, int depth, Stack* ss, Move* best_move_out) {
-    if ((++nodes & 0x1FFF) == 0)
+    const uint64_t node = ++nodes;
+    if (node_limit && node >= node_limit)
+        stop_.store(true, std::memory_order_relaxed);
+    if ((node & 0x1FFF) == 0)
         check_time();
     if (stop_.load(std::memory_order_relaxed))
         return SCORE_ZERO;
@@ -124,15 +135,15 @@ Score Searcher::negamax(Position& pos, Score alpha, Score beta, int depth, Stack
     const bool is_root = (ss->ply == 0);
 
     if (ss->ply >= MAX_SEARCH_PLY)
-        return evaluate(pos);
+        return evaluate_search(pos, is_pv, is_root, depth, alpha, beta);
 
     tt_.prefetch(pos.key);
 
-    if (!has_legal_move(pos))
-        return mated_in(ss->ply);
-
-    if (depth <= 0)
-        return evaluate(pos);
+    if (depth <= 0) {
+        if (pos.bb_arrow.popcount() >= 72 && !has_legal_move(pos))
+            return mated_in(ss->ply);
+        return evaluate_search(pos, is_pv, is_root, depth, alpha, beta);
+    }
 
     auto [hit, tte] = tt_.probe(pos.key);
     Move tt_move = hit ? tte->best_move() : MOVE_NONE;
@@ -158,7 +169,9 @@ Score Searcher::negamax(Position& pos, Score alpha, Score beta, int depth, Stack
         }
     }
 
-    ss->static_eval = (hit && tt_eval != SCORE_NONE) ? tt_eval : evaluate(pos);
+    ss->static_eval = (hit && tt_eval != SCORE_NONE)
+                    ? tt_eval
+                    : evaluate_search(pos, is_pv, is_root, depth, alpha, beta);
 
     const bool improving = (ss - 2)->static_eval != SCORE_NONE
                         && ss->static_eval > (ss - 2)->static_eval;
@@ -224,9 +237,12 @@ Score Searcher::negamax(Position& pos, Score alpha, Score beta, int depth, Stack
     Move m;
     while ((m = picker.next_move()) != MOVE_NONE) {
         ++move_count;
-        const int category_score = g_use_move_categories
-                                 ? amazon_move_category_score(pos, m, ss)
-                                 : 0;
+        int category_score = 0;
+        if (g_use_move_categories) {
+            category_score = picker.last_category_known()
+                           ? picker.last_category_score()
+                           : amazon_move_category_score(pos, m, ss);
+        }
 
         if (futility_ok && category_score < 2500
             && move_count > 1 && best_score > mated_in(MAX_SEARCH_PLY))
@@ -314,6 +330,9 @@ Score Searcher::negamax(Position& pos, Score alpha, Score beta, int depth, Stack
         }
     }
 
+    if (move_count == 0)
+        return mated_in(ss->ply);
+
     TTBound bound = TT_EXACT;
     if (best_score <= orig_alpha)
         bound = TT_UPPER;
@@ -330,17 +349,13 @@ Move Searcher::search(Position& pos, int max_depth, Score* out_score, int thread
     stop_.store(false, std::memory_order_relaxed);
     nodes = 0;
     killers_ = {};
-    std::fill(&history_[0][0][0], &history_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
-    std::fill(&arrow_history_[0][0][0], &arrow_history_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
-    std::fill(&from_arrow_history_[0][0][0], &from_arrow_history_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
-    std::memset(countermoves_, 0, sizeof(countermoves_));
 
     if (thread_id == 0)
         tt_.new_search();
 
-    std::vector<Move> root_moves;
-    generate_moves(pos, root_moves);
-    Move best_move = root_moves.empty() ? MOVE_NONE : root_moves.front();
+    std::array<Move, MAX_LEGAL_MOVES> root_moves{};
+    const int root_count = generate_moves(pos, root_moves.data(), MAX_LEGAL_MOVES);
+    Move best_move = root_count == 0 ? MOVE_NONE : root_moves[0];
     Score best_score = SCORE_ZERO;
 
     std::array<Stack, 128> stack{};

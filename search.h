@@ -93,6 +93,7 @@ public:
 
     // Main entry point: run iterative deepening and return the best move.
     Move search(Position& pos, int max_depth = 64, Score* out_score = nullptr, int thread_id = 0);
+    void new_game();
 
     // Stop the search at the next opportunity.
     void request_stop() { stop_.store(true, std::memory_order_relaxed); }
@@ -105,6 +106,7 @@ public:
 
     // Node counter (informational)
     uint64_t nodes = 0;
+    uint64_t node_limit = 0;
 
 private:
     TranspositionTable& tt_;

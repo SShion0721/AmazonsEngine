@@ -7,6 +7,7 @@
 #include "bitboard.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 
@@ -18,11 +19,12 @@ bool g_use_nnue = false;
 bool g_use_residual_nnue = true;
 bool g_use_pure_nnue = false;
 bool g_use_strong_classical = true;
+int g_eval_tier = EVAL_TIER_MIXED;
 
 namespace {
 
 constexpr int DIST_INF = 127;
-constexpr int EVAL_CACHE_SIZE = 1 << 20;
+constexpr int EVAL_CACHE_SIZE = 1 << 15;
 constexpr int EVAL_CACHE_MASK = EVAL_CACHE_SIZE - 1;
 
 struct DistanceInfo {
@@ -32,11 +34,12 @@ struct DistanceInfo {
 
 struct EvalCacheEntry {
     uint64_t key = 0;
-    bool valid = false;
+    uint32_t epoch = 0;
     EvalInfo info{};
 };
 
-alignas(64) std::array<EvalCacheEntry, EVAL_CACHE_SIZE> g_eval_cache;
+std::atomic<uint32_t> g_eval_cache_epoch{1};
+thread_local std::array<EvalCacheEntry, EVAL_CACHE_SIZE> t_eval_cache;
 
 static Score clamp_static_eval(Score value) {
     return std::clamp(value, -SCORE_INF + 1, SCORE_INF - 1);
@@ -80,6 +83,10 @@ static EvalWeights weights_by_phase(int arrows) {
         { 5, 6, 0, 1, 5, 12},
     };
     return W[phase_bucket(arrows)];
+}
+
+static bool should_try_partition_fast_track(const Position& pos) {
+    return pos.bb_arrow.popcount() >= 56;
 }
 
 static Bitboard128 side_sources(const Position& pos, Color c) {
@@ -332,6 +339,36 @@ static Score eval_partition2(const Position& pos, int* active_areas_out = nullpt
     return score;
 }
 
+static bool partition_fast_track_impl(const Position& pos, Score& out) {
+    const Bitboard128 passable = ~pos.bb_arrow & BOARD_MASK_BB;
+    const Bitboard128 empty = ~pos.bb_occupied & BOARD_MASK_BB;
+    Bitboard128 visited = Bitboard128::zero();
+    Bitboard128 remaining = passable;
+
+    int diff = 0;
+    while (remaining) {
+        const Square start = remaining.lsb();
+        const Bitboard128 component = bb_flood_fill(SQUARE_BB[start], passable & ~visited);
+        visited |= component;
+        remaining &= ~component;
+
+        const int white_count = (component & pos.bb_white).popcount();
+        const int black_count = (component & pos.bb_black).popcount();
+        if (white_count > 0 && black_count > 0)
+            return false;
+
+        const int empty_count = (component & empty).popcount();
+        if (white_count > 0)
+            diff += simple_component_value(empty_count, white_count);
+        else if (black_count > 0)
+            diff -= simple_component_value(empty_count, black_count);
+    }
+
+    Score white_score = clamp_static_eval(diff * 32);
+    out = pos.side_to_move == WHITE ? white_score : -white_score;
+    return true;
+}
+
 static EvalBreakdown compute_classical2_breakdown(const Position& pos) {
     const DistanceInfo info = compute_distances(pos);
     EvalBreakdown out{};
@@ -388,10 +425,11 @@ static EvalInfo compute_eval_info(const Position& pos) {
 }
 
 static const EvalInfo& cached_eval_info(const Position& pos) {
-    EvalCacheEntry& entry = g_eval_cache[pos.key & EVAL_CACHE_MASK];
-    if (!entry.valid || entry.key != pos.key) {
+    const uint32_t epoch = g_eval_cache_epoch.load(std::memory_order_relaxed);
+    EvalCacheEntry& entry = t_eval_cache[pos.key & EVAL_CACHE_MASK];
+    if (entry.epoch != epoch || entry.key != pos.key) {
         entry.key = pos.key;
-        entry.valid = true;
+        entry.epoch = epoch;
         entry.info = compute_eval_info(pos);
     } else {
         entry.info.breakdown.classical = pos.side_to_move == WHITE
@@ -443,7 +481,13 @@ static Score eval_partition_legacy(const Position& pos) {
     return 0;
 }
 
-static Score evaluate_classical_legacy(const Position& pos) {
+static Score evaluate_classical_legacy_impl(const Position& pos, bool allow_partition_fast_track) {
+    if (allow_partition_fast_track && should_try_partition_fast_track(pos)) {
+        Score partition_score = SCORE_ZERO;
+        if (partition_fast_track_impl(pos, partition_score))
+            return partition_score;
+    }
+
     Score raw_eval = g_territory_weight * eval_territory(pos)
                    + g_mobility_weight * eval_mobility(pos);
 
@@ -452,11 +496,19 @@ static Score evaluate_classical_legacy(const Position& pos) {
     return pos.side_to_move == WHITE ? raw_eval : -raw_eval;
 }
 
+static Score evaluate_classical_legacy(const Position& pos) {
+    return evaluate_classical_legacy_impl(pos, true);
+}
+
 } // namespace
 
 void clear_eval_cache() {
-    for (auto& entry : g_eval_cache)
-        entry.valid = false;
+    uint32_t next = g_eval_cache_epoch.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (next == 0) {
+        g_eval_cache_epoch.store(1, std::memory_order_relaxed);
+        for (auto& entry : t_eval_cache)
+            entry.epoch = 0;
+    }
 }
 
 void set_territory_weight(int value) {
@@ -502,8 +554,7 @@ Score evaluate_classical2(const Position& pos) {
 }
 
 Score evaluate_classical(const Position& pos) {
-    return g_use_strong_classical ? evaluate_classical2(pos)
-                                  : evaluate_classical_legacy(pos);
+    return evaluate_with_tier(pos, g_use_strong_classical ? g_eval_tier : EVAL_TIER_FAST);
 }
 
 bool get_eval_breakdown(const Position& pos, EvalBreakdown& out) {
@@ -516,13 +567,34 @@ bool get_eval_info(const Position& pos, EvalInfo& out) {
     return true;
 }
 
-Score evaluate(const Position& pos) {
+bool partition_fast_track(const Position& pos, Score& out) {
+    return partition_fast_track_impl(pos, out);
+}
+
+Score evaluate_with_tier(const Position& pos, int tier) {
+    const bool nnue_active = g_use_nnue && g_nnue_loaded;
+
+    if (!g_use_strong_classical && !nnue_active)
+        return evaluate_classical_legacy(pos);
+
+    if (!nnue_active) {
+        Score partition_score = SCORE_ZERO;
+        if (should_try_partition_fast_track(pos) && partition_fast_track_impl(pos, partition_score))
+            return partition_score;
+
+        if (tier <= EVAL_TIER_FAST)
+            return evaluate_classical_legacy_impl(pos, false);
+
+        if (tier == EVAL_TIER_MIXED && pos.bb_arrow.popcount() < 56)
+            return evaluate_classical_legacy_impl(pos, false);
+    }
+
     const EvalInfo& info = cached_eval_info(pos);
     const Score classical = g_use_strong_classical
                           ? info.breakdown.classical
                           : evaluate_classical_legacy(pos);
 
-    if (g_use_nnue && g_nnue_loaded) {
+    if (nnue_active) {
         Score nnue_eval = NNUE::evaluate_nnue(pos.side_to_move,
                                               pos.history[pos.ply].accumulator,
                                               info.global.v,
@@ -537,4 +609,29 @@ Score evaluate(const Position& pos) {
     }
 
     return classical;
+}
+
+Score evaluate_search(const Position& pos, bool is_pv, bool is_root, int depth, Score alpha, Score beta) {
+    const bool nnue_active = g_use_nnue && g_nnue_loaded;
+    if (!g_use_strong_classical && !nnue_active)
+        return evaluate_classical_legacy(pos);
+
+    if (g_eval_tier == EVAL_TIER_STRONG || nnue_active)
+        return evaluate_with_tier(pos, EVAL_TIER_STRONG);
+
+    if (g_eval_tier == EVAL_TIER_FAST)
+        return evaluate_with_tier(pos, EVAL_TIER_FAST);
+
+    if (is_root || is_pv || depth >= 3 || pos.bb_arrow.popcount() >= 56)
+        return evaluate_with_tier(pos, EVAL_TIER_STRONG);
+
+    const Score fast = evaluate_with_tier(pos, EVAL_TIER_FAST);
+    if (std::abs(fast - alpha) <= 180 || std::abs(fast - beta) <= 180)
+        return evaluate_with_tier(pos, EVAL_TIER_STRONG);
+
+    return fast;
+}
+
+Score evaluate(const Position& pos) {
+    return evaluate_with_tier(pos, g_use_strong_classical ? g_eval_tier : EVAL_TIER_FAST);
 }

@@ -43,6 +43,11 @@ struct NetworkParameters {
 };
 
 extern NetworkParameters g_weights;
+extern bool g_accumulator_enabled;
+
+inline bool accumulator_enabled() {
+    return g_accumulator_enabled;
+}
 
 void init_random_weights();
 bool load_weights(const std::string& path);

@@ -366,7 +366,9 @@ void init_uci_options() {
         g_eval_file = value;
         bool loaded = NNUE::load_weights(g_eval_file);
         g_nnue_loaded = loaded;
-        g_pos.compute_accumulator();
+        NNUE::g_accumulator_enabled = g_use_nnue && g_nnue_loaded;
+        if (NNUE::accumulator_enabled())
+            g_pos.compute_accumulator();
         g_tt.clear();
         clear_eval_cache();
         if (loaded) {
@@ -387,6 +389,9 @@ void init_uci_options() {
             return "Invalid Use NNUE value: " + value;
 
         g_use_nnue = enabled;
+        NNUE::g_accumulator_enabled = g_use_nnue && g_nnue_loaded;
+        if (NNUE::accumulator_enabled())
+            g_pos.compute_accumulator();
         g_tt.clear();
         clear_eval_cache();
 
@@ -436,6 +441,50 @@ void init_uci_options() {
         clear_eval_cache();
         return enabled ? "Strong classical eval enabled"
                        : "Strong classical eval disabled; legacy territory/mobility eval active";
+    });
+
+    add_string_option("Eval Tier", "Mixed",
+                      [](const std::string& value) -> std::optional<std::string> {
+        std::string lowered = value;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (lowered == "fast")
+            g_eval_tier = EVAL_TIER_FAST;
+        else if (lowered == "mixed")
+            g_eval_tier = EVAL_TIER_MIXED;
+        else if (lowered == "strong")
+            g_eval_tier = EVAL_TIER_STRONG;
+        else
+            return "Invalid Eval Tier value: " + value + " (expected Fast, Mixed, or Strong)";
+
+        g_tt.clear();
+        clear_eval_cache();
+        return "Eval Tier set to " + value;
+    });
+
+    add_check_option("Use Bounded MoveGen", true,
+                     [](const std::string& value) -> std::optional<std::string> {
+        bool enabled = false;
+        if (!try_parse_bool(value, enabled))
+            return "Invalid Use Bounded MoveGen value: " + value;
+        g_use_bounded_movegen = enabled;
+        return enabled ? "Bounded MoveGen enabled" : "Bounded MoveGen disabled";
+    });
+
+    add_spin_option("Bounded Dest Cap", 16, 1, 64,
+                    [](const std::string& value) -> std::optional<std::string> {
+        int cap = 0;
+        if (!try_parse_int(value, cap)) return "Invalid Bounded Dest Cap value: " + value;
+        g_bounded_dest_cap = std::clamp(cap, 1, 64);
+        return "Bounded Dest Cap set to " + std::to_string(g_bounded_dest_cap);
+    });
+
+    add_spin_option("Bounded Arrow Cap", 12, 1, 64,
+                    [](const std::string& value) -> std::optional<std::string> {
+        int cap = 0;
+        if (!try_parse_int(value, cap)) return "Invalid Bounded Arrow Cap value: " + value;
+        g_bounded_arrow_cap = std::clamp(cap, 1, 64);
+        return "Bounded Arrow Cap set to " + std::to_string(g_bounded_arrow_cap);
     });
 
     add_check_option("Use Null Move", false,
@@ -646,6 +695,8 @@ static void cmd_go(std::istringstream& is) {
     std::string token;
     int wtime = 0, btime = 0, winc = 0, binc = 0;
     int movestogo = 30, movetime = 0;
+    int depth_limit = 64;
+    uint64_t node_limit = 0;
 
     while (is >> token) {
         if      (token == "wtime"     && is >> wtime)    {}
@@ -654,24 +705,37 @@ static void cmd_go(std::istringstream& is) {
         else if (token == "binc"      && is >> binc)     {}
         else if (token == "movestogo" && is >> movestogo) {}
         else if (token == "movetime"  && is >> movetime)  {}
+        else if (token == "depth"     && is >> depth_limit) {}
+        else if (token == "nodes") {
+            int parsed_nodes = 0;
+            if (is >> parsed_nodes && parsed_nodes > 0)
+                node_limit = static_cast<uint64_t>(parsed_nodes);
+        }
     }
     stop_search_and_join();
 
     auto root_pos = std::make_shared<Position>(g_pos);
 
-    g_search_thread = std::thread([wtime, btime, winc, binc, movestogo, movetime, root_pos]() mutable {
+    g_search_thread = std::thread([wtime, btime, winc, binc, movestogo, movetime,
+                                   depth_limit, node_limit, root_pos]() mutable {
         if (movetime > 0) {
             g_searcher.time_man.set_movetime(movetime, g_move_overhead);
+        } else if (node_limit > 0 || (wtime <= 0 && btime <= 0)) {
+            g_searcher.time_man.set_movetime(60 * 60 * 1000, 0);
         } else {
             int my_time = (root_pos->side_to_move == WHITE) ? wtime : btime;
             int my_inc  = (root_pos->side_to_move == WHITE) ? winc  : binc;
             g_searcher.time_man.init(my_time, my_inc, movestogo, g_move_overhead);
         }
+        const uint64_t per_thread_node_limit = node_limit > 0
+            ? std::max<uint64_t>(1, node_limit / static_cast<uint64_t>(std::max(1, g_threads)))
+            : 0;
+        g_searcher.node_limit = per_thread_node_limit;
 
-        g_go_helpers.start_searching(*root_pos, g_searcher.time_man, 64);
+        g_go_helpers.start_searching(*root_pos, g_searcher.time_man, depth_limit, per_thread_node_limit);
 
         g_searcher.silent = false;
-        g_searcher.search(*root_pos, 64, nullptr, 0);
+        g_searcher.search(*root_pos, depth_limit, nullptr, 0);
 
         g_go_helpers.request_stop();
         g_go_helpers.wait_for_search_finished();
@@ -701,6 +765,7 @@ int main() {
         std::cout << "info string Failed to load " << g_eval_file
                   << ", using classical eval only.\n";
     }
+    NNUE::g_accumulator_enabled = g_use_nnue && g_nnue_loaded;
     g_pos.set_startpos();
 
     std::cout << "Amazons Engine v2.1 - Stockfish-inspired (PEXT+ClusterTT+NNUE/ClassicalEval)\n";
@@ -736,6 +801,8 @@ int main() {
             stop_search_and_join();
             g_tt.clear();
             clear_eval_cache();
+            g_searcher.new_game();
+            g_go_helpers.new_game();
             g_pos.set_startpos();
 
         } else if (token == "position") {
@@ -758,14 +825,14 @@ int main() {
             EvalInfo ei;
             get_eval_info(g_pos, ei);
             Score classical = evaluate_classical(g_pos);
-            Score n = g_nnue_loaded
+            const bool nnue_active = g_use_nnue && g_nnue_loaded;
+            Score n = nnue_active
                     ? NNUE::evaluate_nnue(g_pos.side_to_move,
                                           g_pos.history[g_pos.ply].accumulator,
                                           ei.global.v,
                                           ei.phase_bucket)
                     : 0;
             Score total = evaluate(g_pos);
-            const bool nnue_active = g_use_nnue && g_nnue_loaded;
             const char* mode_name = !nnue_active ? "Classical"
                                   : g_use_pure_nnue ? "Pure NNUE"
                                   : g_use_residual_nnue ? "Fusion NNUE v2"
@@ -836,6 +903,7 @@ int main() {
             std::optional<int> requested_game_threads;
             int hash_size = 16; // Default 16 MB per game
             std::optional<int> requested_search_threads;
+            uint64_t nodes_per_move = 0;
 
             std::vector<std::string> selfplay_args;
             while (is >> token) {
@@ -868,6 +936,11 @@ int main() {
             if (selfplay_args.size() >= 6) {
                 requested_search_threads = parse_positive_int_or_auto(selfplay_args[5]);
             }
+            if (selfplay_args.size() >= 7) {
+                int parsed = 0;
+                if (try_parse_int(selfplay_args[6], parsed) && parsed > 0)
+                    nodes_per_move = static_cast<uint64_t>(parsed);
+            }
 
             hash_size = std::max(1, hash_size);
             SelfplayThreadPlan thread_plan = resolve_selfplay_threads(
@@ -878,6 +951,7 @@ int main() {
             std::cout << "Starting selfplay for " << games << " games...\n"
                       << "  Search Depth: " << max_depth << "\n"
                       << "  Move Time: " << move_time << "ms\n"
+                      << "  Nodes/Move: " << (nodes_per_move ? std::to_string(nodes_per_move) : std::string("time-limited")) << "\n"
                       << "  Game Threads: " << game_threads << "\n"
                       << "  Search Threads/Game: " << search_threads << "\n"
                       << "  Hash Size/Game: " << hash_size << "MB\n";
@@ -1018,6 +1092,8 @@ int main() {
                     if (g >= games)
                         break;
 
+                    local_searcher.new_game();
+                    local_helpers.new_game();
                     local_pos->set_startpos();
 
                     {
@@ -1059,8 +1135,15 @@ int main() {
                         }
 
                         Score search_score = SCORE_ZERO;
-                        local_searcher.time_man.set_movetime(move_time);
-                        local_helpers.start_searching(*local_pos, local_searcher.time_man, max_depth);
+                        if (nodes_per_move > 0)
+                            local_searcher.time_man.set_movetime(60 * 60 * 1000, 0);
+                        else
+                            local_searcher.time_man.set_movetime(move_time);
+                        const uint64_t per_thread_nodes = nodes_per_move > 0
+                            ? std::max<uint64_t>(1, nodes_per_move / static_cast<uint64_t>(std::max(1, search_threads)))
+                            : 0;
+                        local_searcher.node_limit = per_thread_nodes;
+                        local_helpers.start_searching(*local_pos, local_searcher.time_man, max_depth, per_thread_nodes);
                         Move best = local_searcher.search(*local_pos, max_depth, &search_score);
                         local_helpers.request_stop();
                         local_helpers.wait_for_search_finished();
