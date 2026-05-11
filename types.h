@@ -1,4 +1,4 @@
-﻿/*==================================================================
+/*==================================================================
  * AMAZONS ENGINE — types.h
  * Core types, constants, and board coordinate utilities.
  * Mirrors Stockfish's types.h

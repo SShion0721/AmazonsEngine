@@ -1,4 +1,4 @@
-﻿/*==================================================================
+/*==================================================================
  * AMAZONS ENGINE — position.h
  * Board state, Zobrist hashing, do_move / undo_move.
  * Mirrors Stockfish's position.h / position.cpp
