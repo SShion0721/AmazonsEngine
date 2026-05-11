@@ -1,4 +1,4 @@
-﻿/*==================================================================
+/*==================================================================
  * AMAZONS ENGINE - search.cpp
  * Full Negamax PVS implementation with Stockfish-inspired pruning,
  * ordering, and TT handling adapted for Amazons.
@@ -542,7 +542,7 @@ Move Searcher::search(Position& pos, int max_depth, Score* out_score, int thread
             if (out_score)
                 *out_score = best_score;
             if (!silent) {
-                std::cout << "info depth mcts score cp " << best_score
+                std::cout << "info depth 20 score cp " << best_score
                           << " nodes " << nodes
                           << " time " << time_man.elapsed_ms()
                           << " pv " << move_to_str(best_move)

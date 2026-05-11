@@ -314,12 +314,15 @@ def make_move():
     for info in info_lines:
         parts = info.split()
         for i, token in enumerate(parts):
-            if token == 'depth' and i + 1 < len(parts):
-                depth = int(parts[i + 1])
-            elif token == 'cp' and i + 1 < len(parts):
-                score = int(parts[i + 1])
-            elif token == 'nodes' and i + 1 < len(parts):
-                nodes = int(parts[i + 1])
+            try:
+                if token == 'depth' and i + 1 < len(parts):
+                    depth = int(parts[i + 1])
+                elif token == 'cp' and i + 1 < len(parts):
+                    score = int(parts[i + 1])
+                elif token == 'nodes' and i + 1 < len(parts):
+                    nodes = int(parts[i + 1])
+            except (ValueError, TypeError):
+                continue
 
     return jsonify({
         'bestmove': bestmove,
