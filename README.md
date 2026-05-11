@@ -412,10 +412,3 @@ selfplay 100000 8 1000 1 64 1
 
 训练 AMZNUE2 时，生成 teacher 数据通常应关闭 NNUE，避免旧网络或未收敛网络污染标签。
 
-## 剩余调参方向
-
-- MCTS prior 权重需要 paired selfplay 调。
-- `MCTS Time Share` 和 `AB Verify TopN` 已按箭数自适应，但仍需要按 1 秒/步目标微调。
-- ChampionEvalFast 目前是轻量启发式，不是完整 CGT/endgame solver。
-- TeacherSafe 棋力更强但吞吐低，不应该用它追求 80 games/s。
-- 小分区 exact solver 已有第一版：只解单边小 component，混合小区域精搜仍可继续增强。
