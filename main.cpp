@@ -1094,7 +1094,7 @@ int main() {
 
         } else if (token == "uci") {
             std::cout << "id name AmazonsEngine v2.1\n"
-                      << "id author YourName\n"
+                      << "id author Sion\n"
                       << "\n";
             print_uci_options();
             std::cout << "uciok\n";

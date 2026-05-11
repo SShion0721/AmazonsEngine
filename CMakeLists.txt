@@ -10,7 +10,7 @@ if (MSVC)
     add_link_options(/LTCG)
 else()
     add_compile_options(-O3 -DNDEBUG -march=native -flto -funroll-loops)
-    add_link_options(-flto)
+    add_link_options(-flto -static-libgcc -static-libstdc++ -static)
 endif()
 
 add_executable(amazons
