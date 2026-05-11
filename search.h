@@ -1,19 +1,19 @@
 ﻿/*==================================================================
- * AMAZONS ENGINE 鈥?search.h
+ * AMAZONS ENGINE -- search.h
  * Negamax Alpha-Beta search engine.
  * Mirrors Stockfish's search.h / search.cpp
  *
  * Techniques implemented (all with SF-style annotations):
- *   鉁?Negamax with Alpha-Beta pruning
- *   鉁?Principal Variation Search (PVS / NegaScout)
- *   鉁?Iterative Deepening (ID)
- *   鉁?Aspiration Windows
- *   鉁?Transposition Table (TT) cutoffs
- *   鉁?Reverse Futility Pruning (RFP)
- *   鉁?Late Move Reduction (LMR) with a precomputed log table
- *   鉁?Killer Move Heuristic (2 per depth)
- *   鉁?History Heuristic for move ordering
- *   鉁?Time management (soft + hard limits)
+ *   * Negamax with Alpha-Beta pruning
+ *   * Principal Variation Search (PVS / NegaScout)
+ *   * Iterative Deepening (ID)
+ *   * Aspiration Windows
+ *   * Transposition Table (TT) cutoffs
+ *   * Reverse Futility Pruning (RFP)
+ *   * Late Move Reduction (LMR) with a precomputed log table
+ *   * Killer Move Heuristic (2 per depth)
+ *   * History Heuristic for move ordering
+ *   * Time management (soft + hard limits)
  *==================================================================*/
 #pragma once
 #include "position.h"
@@ -46,7 +46,7 @@ enum SearchMode {
 
 extern int g_search_mode;
 
-// 鈹€鈹€ Search stack (one entry per depth) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ==== Search stack (one entry per depth) ====
 // Mirrors SF's Search::Stack.
 struct Stack {
     Move  killers[2]   = { MOVE_NONE, MOVE_NONE };
@@ -58,7 +58,7 @@ struct Stack {
     Move  excluded     = MOVE_NONE; // for Singular Extensions
 };
 
-// 鈹€鈹€ TimeManager 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ==== TimeManager ====
 // Decides when to stop the search (mirrors SF's TimeManagement).
 class TimeManager {
 public:
@@ -101,7 +101,7 @@ private:
     int hard_limit_ = 10000;
 };
 
-// 鈹€鈹€ Searcher 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ==== Searcher ====
 class Searcher {
 public:
     explicit Searcher(TranspositionTable& tt)
@@ -133,13 +133,13 @@ private:
     TranspositionTable& tt_;
     std::atomic<bool>   stop_{ false };
 
-    // 鈹€鈹€ Killer moves [depth][0..1] 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ==== Killer moves [depth][0..1] ====
     // "Killer" moves are quiet moves that caused a beta cutoff at the
     // same depth in another branch. They are tried early in move ordering.
     std::array<std::array<Move, 2>, 128> killers_{};
 
-    // 鈹€鈹€ History heuristic [color][from][to] 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-    // Bonus accumulated each time move (from鈫抰o) causes a beta cutoff.
+    // ---- History heuristic [color][from][to] ----
+    // Bonus accumulated each time move (from->to) causes a beta cutoff.
     // Bigger bonus = move is tried earlier in sibling nodes.
     int history_[2][BOARD_SQ][BOARD_SQ]{};
 
@@ -151,11 +151,11 @@ private:
     int butterfly_to_arrow_[2][BOARD_SQ][BOARD_SQ]{};
     int butterfly_from_arrow_[2][BOARD_SQ][BOARD_SQ]{};
 
-    // 鈹€鈹€ LMR table [depth][move_index] 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ---- LMR table [depth][move_index] ----
     // Precomputed reduction amounts (mirrors SF's lmr[][]).
     int lmr_[64][64]{};
 
-    // 鈹€鈹€ Countermove table [color][from][to] 鈫?Move 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ---- Countermove table [color][from][to] -> Move ----
     // The "best reply" to a given previous move. Tried right after
     // TT move and killers. Mirrors SF's Countermoves.
     Move countermoves_[2][BOARD_SQ][BOARD_SQ]{};

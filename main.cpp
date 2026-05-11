@@ -1,19 +1,19 @@
 ﻿/*==================================================================
- * AMAZONS ENGINE 鈥?main.cpp
+ * AMAZONS ENGINE -- main.cpp
  * UCI-compatible command loop and engine entry point.
  * Mirrors Stockfish's uci.cpp / main.cpp
  *
  * Supported commands:
- *   uci              鈥?engine identification
- *   isready          鈥?sync (engine replies "readyok")
- *   ucinewgame       鈥?reset TT + position
+ *   uci              -- engine identification
+ *   isready          -- sync (engine replies "readyok")
+ *   ucinewgame       -- reset TT + position
  *   position startpos [moves <move...>]
  *   go movetime <ms>
  *   go wtime <ms> btime <ms> [winc <ms>] [binc <ms>] [movestogo <n>]
- *   stop             鈥?stop search
- *   quit             鈥?exit
- *   d                鈥?print current board (debug)
- *   eval             鈥?print evaluation breakdown (debug)
+ *   stop             -- stop search
+ *   quit             -- exit
+ *   d                -- print current board (debug)
+ *   eval             -- print evaluation breakdown (debug)
  *==================================================================*/
 #include "position.h"
 #include "movegen.h"
@@ -54,13 +54,13 @@
 #include <windows.h>
 #endif
 
-// 鈹€鈹€ Global objects 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ==== Global objects ====
 static TranspositionTable g_tt(64); // 64 MB TT
 static Searcher           g_searcher(g_tt);
 static Position           g_pos;
 static std::thread        g_search_thread;
 
-// 鈹€鈹€ UCI Configuration (mirrors Stockfish's Options map) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ==== UCI Configuration (mirrors Stockfish's Options map) ====
 static int    g_threads      = 1;     // Lazy SMP thread count
 static int    g_move_overhead = 10;   // ms safety buffer for communication delay
 static std::string g_eval_file = "nnue.bin"; // NNUE weight file path
@@ -933,7 +933,7 @@ void setoption_from_stream(std::istringstream& is) {
 
 } // namespace
 
-// 鈹€鈹€ Parse "position" command 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ==== Parse "position" command ====
 // Format: position startpos [moves e1-e3/e4 ...]
 static void stop_search_and_join(bool request_stop = true) {
     if (!g_search_thread.joinable()) {
@@ -982,7 +982,7 @@ static void cmd_position(std::istringstream& is) {
     }
 }
 
-// 鈹€鈹€ Parse "go" command 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ==== Parse "go" command ====
 // Search runs in a background thread so the UCI loop stays responsive.
 static void cmd_go(std::istringstream& is) {
     std::string token;
@@ -1046,7 +1046,7 @@ static void cmd_go(std::istringstream& is) {
     });
 }
 
-// 鈹€鈹€ Main UCI loop 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ==== Main UCI loop ====
 int main() {
     // Must-do initializations (like SF's main() calling init functions)
 #ifdef _WIN32
