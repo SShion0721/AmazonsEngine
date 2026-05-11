@@ -21,7 +21,9 @@ add_executable(amazons
     position.cpp
     movegen.cpp
     evaluate.cpp
+    policy_prior.cpp
     movepicker.cpp
+    mcts.cpp
     search.cpp
     search_threads.cpp
     nnue/nnue.cpp
@@ -38,6 +40,7 @@ add_executable(convert_selfplay
     line_pattern.cpp
     position.cpp
     evaluate.cpp
+    policy_prior.cpp
     nnue/nnue.cpp
 )
 
@@ -49,6 +52,7 @@ add_executable(verify_refactor
     position.cpp
     movegen.cpp
     evaluate.cpp
+    policy_prior.cpp
     nnue/nnue.cpp
 )
 
@@ -60,7 +64,26 @@ add_executable(bench_refactor
     position.cpp
     movegen.cpp
     movepicker.cpp
+    mcts.cpp
     search.cpp
     evaluate.cpp
+    policy_prior.cpp
     nnue/nnue.cpp
 )
+target_link_libraries(bench_refactor PRIVATE Threads::Threads)
+
+add_executable(mcts_safety
+    test/mcts_safety.cpp
+    rays.cpp
+    bitboard.cpp
+    line_pattern.cpp
+    position.cpp
+    movegen.cpp
+    movepicker.cpp
+    mcts.cpp
+    search.cpp
+    evaluate.cpp
+    policy_prior.cpp
+    nnue/nnue.cpp
+)
+target_link_libraries(mcts_safety PRIVATE Threads::Threads)

@@ -7,6 +7,8 @@
 #include "movegen.h"
 #include "evaluate.h"
 #include "movepicker.h"
+#include "mcts.h"
+#include "policy_prior.h"
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -19,6 +21,15 @@ bool g_use_null_move_pruning = false;
 bool g_use_lmp_pruning = true;
 bool g_use_move_categories = true;
 bool g_teacher_safe_search = false;
+bool g_use_soft_tail_search = true;
+bool g_use_mcts_root = true;
+int g_mcts_time_share = 75;
+int g_ab_verify_topn = 6;
+int g_mcts_min_time_ms = 80;
+int g_mcts_cpuct = 120;
+int g_mcts_threads = 1;
+bool g_use_tree_reuse = true;
+int g_search_mode = SEARCH_MODE_MATCH;
 
 namespace {
 
@@ -61,6 +72,10 @@ inline void update_history_score(int& entry, int delta) {
 }
 
 int candidate_cap(int phase, int depth, bool is_root, bool is_pv) {
+    if (g_teacher_safe_search || g_search_mode == SEARCH_MODE_TEACHER_SAFE)
+        return 1000000;
+    if (g_search_mode != SEARCH_MODE_FAST_SELFPLAY && (is_root || is_pv))
+        return 1000000;
     if (phase >= 56)
         return 1000000;
 
@@ -83,6 +98,86 @@ int candidate_cap(int phase, int depth, bool is_root, bool is_pv) {
     return 520 + pv_bonus;
 }
 
+bool should_use_mcts_root(const Position& pos, int max_depth, int thread_id, const TimeManager& tm, uint64_t node_limit) {
+    if (thread_id != 0)
+        return false;
+    if (!g_use_mcts_root || g_search_mode != SEARCH_MODE_MATCH || g_teacher_safe_search)
+        return false;
+    if (node_limit != 0)
+        return false;
+    if (max_depth < 8)
+        return false;
+    if (pos.bb_arrow.popcount() >= 56)
+        return false;
+    if (tm.soft_limit_ms() > 30000)
+        return false;
+
+    const int remaining = tm.soft_limit_ms() - tm.elapsed_ms();
+    return remaining >= g_mcts_min_time_ms;
+}
+
+struct AdaptiveMctsParams {
+    MctsConfig config;
+    int time_share = 75;
+    int verify_topn = 6;
+};
+
+AdaptiveMctsParams adaptive_mcts_params(const Position& pos, int remaining_ms) {
+    AdaptiveMctsParams params;
+    const int arrows = pos.bb_arrow.popcount();
+    params.time_share = std::clamp(g_mcts_time_share, 1, 100);
+    params.verify_topn = std::max(0, g_ab_verify_topn);
+    params.config.cpuct = std::clamp(g_mcts_cpuct, 1, 1000) / 100.0;
+    params.config.threads = std::max(1, g_mcts_threads);
+    params.config.use_tree_reuse = g_use_tree_reuse;
+    params.config.use_policy_prior = g_use_policy_prior && policy_prior_loaded();
+    params.config.policy_blend = std::clamp(g_policy_prior_blend, 0, 100);
+
+    if (arrows < 20) {
+        params.time_share = std::max(params.time_share, 85);
+        if (params.verify_topn > 0)
+            params.verify_topn = std::min(params.verify_topn, 4);
+        params.config.root_initial_width = 192;
+        params.config.root_max_candidates = 512;
+        params.config.node_initial_width = 8;
+        params.config.node_max_candidates = 160;
+        params.config.rollout_plies = 6;
+        params.config.uct_c = 0.50;
+    } else if (arrows < 45) {
+        params.config.root_initial_width = 160;
+        params.config.root_max_candidates = 448;
+        params.config.node_initial_width = 8;
+        params.config.node_max_candidates = 192;
+        params.config.rollout_plies = 6;
+        params.config.uct_c = 0.45;
+    } else {
+        params.time_share = std::min(params.time_share, 60);
+        if (params.verify_topn > 0)
+            params.verify_topn = std::max(params.verify_topn, 8);
+        params.config.root_initial_width = 96;
+        params.config.root_max_candidates = 256;
+        params.config.node_initial_width = 6;
+        params.config.node_max_candidates = 128;
+        params.config.rollout_plies = 4;
+        params.config.uct_c = 0.40;
+    }
+
+    if (remaining_ms < 300) {
+        params.time_share = std::min(params.time_share, 70);
+        if (params.verify_topn > 0)
+            params.verify_topn = std::min(params.verify_topn, 3);
+        params.config.root_initial_width = std::min(params.config.root_initial_width, 96);
+        params.config.root_max_candidates = std::min(params.config.root_max_candidates, 256);
+        params.config.node_max_candidates = std::min(params.config.node_max_candidates, 96);
+        params.config.rollout_plies = std::min(params.config.rollout_plies, 4);
+    } else if (remaining_ms >= 1500 && arrows < 20) {
+        params.config.root_initial_width = 256;
+        params.config.root_max_candidates = 640;
+    }
+
+    return params;
+}
+
 } // namespace
 
 void Searcher::init_tables() {
@@ -103,6 +198,9 @@ void Searcher::new_game() {
     std::fill(&history_[0][0][0], &history_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
     std::fill(&arrow_history_[0][0][0], &arrow_history_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
     std::fill(&from_arrow_history_[0][0][0], &from_arrow_history_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
+    std::fill(&butterfly_from_to_[0][0][0], &butterfly_from_to_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
+    std::fill(&butterfly_to_arrow_[0][0][0], &butterfly_to_arrow_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
+    std::fill(&butterfly_from_arrow_[0][0][0], &butterfly_from_arrow_[0][0][0] + 2 * BOARD_SQ * BOARD_SQ, 0);
     std::memset(countermoves_, 0, sizeof(countermoves_));
 }
 
@@ -120,6 +218,19 @@ void Searcher::update_histories(Move m, int depth, Stack* ss, Color us) {
     const Move prev = (ss - 1)->current_move;
     if (prev != MOVE_NONE)
         countermoves_[us][move_from(prev)][move_to(prev)] = m;
+}
+
+void Searcher::update_butterflies(Move m, Color us) {
+    auto bump = [](int& entry) {
+        if (entry < (1 << 24))
+            ++entry;
+        else
+            entry = (entry >> 1) + 1;
+    };
+
+    bump(butterfly_from_to_[us][move_from(m)][move_to(m)]);
+    bump(butterfly_to_arrow_[us][move_to(m)][move_arrow(m)]);
+    bump(butterfly_from_arrow_[us][move_from(m)][move_arrow(m)]);
 }
 
 Score Searcher::negamax(Position& pos, Score alpha, Score beta, int depth, Stack* ss, Move* best_move_out) {
@@ -231,6 +342,9 @@ Score Searcher::negamax(Position& pos, Score alpha, Score beta, int depth, Stack
                       history_,
                       arrow_history_,
                       from_arrow_history_,
+                      butterfly_from_to_,
+                      butterfly_to_arrow_,
+                      butterfly_from_arrow_,
                       countermove,
                       move_buffers_[std::min(ss->ply, 127)],
                       lmp_threshold);
@@ -251,9 +365,12 @@ Score Searcher::negamax(Position& pos, Score alpha, Score beta, int depth, Stack
         if (!is_root && !is_pv
             && move_count > lmp_threshold
             && best_score > mated_in(MAX_SEARCH_PLY))
-            break;
+            if (!g_use_soft_tail_search)
+                break;
 
         const Color us = pos.side_to_move;
+        const bool is_tail = picker.last_tail_known() && picker.last_tail();
+        update_butterflies(m, us);
         pos.do_move(m);
         ss->move_count = move_count;
         (ss + 1)->current_move = m;
@@ -278,6 +395,9 @@ Score Searcher::negamax(Position& pos, Score alpha, Score beta, int depth, Stack
                     reduction = std::max(0, reduction - 1);
                 else if (h_score < -4000 || category_score < -1500)
                     reduction += 1;
+
+                if (is_tail && !is_root && !is_pv)
+                    reduction += 2 + depth / 4;
 
                 if (is_pv)
                     reduction = std::max(0, reduction - 1);
@@ -349,9 +469,89 @@ Move Searcher::search(Position& pos, int max_depth, Score* out_score, int thread
     stop_.store(false, std::memory_order_relaxed);
     nodes = 0;
     killers_ = {};
+    last_mcts_valid_ = false;
+    last_mcts_result_ = MctsResult{};
 
     if (thread_id == 0)
         tt_.new_search();
+
+    max_depth = std::min(max_depth, MAX_SEARCH_PLY);
+
+    if (should_use_mcts_root(pos, max_depth, thread_id, time_man, node_limit)) {
+        const int remaining = std::max(1, time_man.soft_limit_ms() - time_man.elapsed_ms());
+        const AdaptiveMctsParams adaptive = adaptive_mcts_params(pos, remaining);
+        const int budget = std::clamp(remaining * adaptive.time_share / 100,
+                                      g_mcts_min_time_ms,
+                                      remaining);
+        MctsResult mcts = run_mcts_root(pos, budget, adaptive.config, &stop_);
+
+        if (mcts.best_move != MOVE_NONE && is_pseudo_legal(pos, mcts.best_move)) {
+            last_mcts_result_ = mcts;
+            last_mcts_valid_ = true;
+            Move best_move = mcts.best_move;
+            Score best_score = mcts.score;
+
+            if (!silent) {
+                std::cout << "info string mcts playouts " << mcts.playouts
+                          << " rootChildren " << mcts.root_children
+                          << " rootCandidates " << mcts.root_candidates
+                          << " budgetMs " << budget
+                          << " share " << adaptive.time_share
+                          << " rollout " << adaptive.config.rollout_plies
+                          << " best " << move_to_str(best_move)
+                          << std::endl;
+            }
+
+            const int verify_count = std::min<int>(adaptive.verify_topn,
+                                                   mcts.root_moves.size());
+            const int verify_remaining = time_man.soft_limit_ms() - time_man.elapsed_ms();
+            const int verify_depth = verify_remaining < 500 ? 2
+                                   : verify_remaining < 1000 ? 3
+                                   : std::clamp(max_depth / 3, 2, 4);
+            const int verify_limit = verify_remaining < 500 ? std::min(verify_count, 3)
+                                   : verify_remaining < 1000 ? std::min(verify_count, 5)
+                                   : verify_count;
+            if (verify_limit > 0 && verify_remaining >= 80 && verify_depth >= 2 && !time_man.soft_stop()) {
+                std::array<Stack, 128> stack{};
+                Stack* ss = stack.data() + 4;
+                ss->ply = 0;
+
+                for (int i = 0; i < verify_limit; ++i) {
+                    const Move m = mcts.root_moves[i].move;
+                    if (time_man.soft_stop() || stop_.load(std::memory_order_relaxed))
+                        break;
+                    if (!is_pseudo_legal(pos, m))
+                        continue;
+
+                    pos.do_move(m);
+                    ss->current_move = m;
+                    (ss + 1)->current_move = m;
+                    (ss + 1)->ply = 1;
+                    Score score = -negamax(pos, -SCORE_INF, SCORE_INF, verify_depth - 1, ss + 1);
+                    pos.undo_move(m);
+
+                    if (stop_.load(std::memory_order_relaxed))
+                        break;
+                    if (m == best_move || score > best_score) {
+                        best_score = score;
+                        best_move = m;
+                    }
+                }
+            }
+
+            if (out_score)
+                *out_score = best_score;
+            if (!silent) {
+                std::cout << "info depth mcts score cp " << best_score
+                          << " nodes " << nodes
+                          << " time " << time_man.elapsed_ms()
+                          << " pv " << move_to_str(best_move)
+                          << std::endl;
+                std::cout << "bestmove " << move_to_str(best_move) << std::endl;
+            }
+            return best_move;
+        }
+    }
 
     std::array<Move, MAX_LEGAL_MOVES> root_moves{};
     const int root_count = generate_moves(pos, root_moves.data(), MAX_LEGAL_MOVES);
@@ -361,8 +561,6 @@ Move Searcher::search(Position& pos, int max_depth, Score* out_score, int thread
     std::array<Stack, 128> stack{};
     Stack* ss = stack.data() + 4;
     ss->ply = 0;
-
-    max_depth = std::min(max_depth, MAX_SEARCH_PLY);
 
     for (int depth = 1; depth <= max_depth; ++depth) {
         if (thread_id > 0 && depth > 3 && (depth + thread_id) % 2 == 0)

@@ -19,6 +19,7 @@
 #include "position.h"
 #include "tt.h"
 #include "movepicker.h"
+#include "mcts.h"
 #include <atomic>
 #include <chrono>
 #include <array>
@@ -28,6 +29,22 @@ extern bool g_use_null_move_pruning;
 extern bool g_use_lmp_pruning;
 extern bool g_use_move_categories;
 extern bool g_teacher_safe_search;
+extern bool g_use_soft_tail_search;
+extern bool g_use_mcts_root;
+extern int g_mcts_time_share;
+extern int g_ab_verify_topn;
+extern int g_mcts_min_time_ms;
+extern int g_mcts_cpuct;
+extern int g_mcts_threads;
+extern bool g_use_tree_reuse;
+
+enum SearchMode {
+    SEARCH_MODE_FAST_SELFPLAY = 0,
+    SEARCH_MODE_TEACHER_SAFE = 1,
+    SEARCH_MODE_MATCH = 2
+};
+
+extern int g_search_mode;
 
 // 鈹€鈹€ Search stack (one entry per depth) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 // Mirrors SF's Search::Stack.
@@ -75,6 +92,8 @@ public:
 
     bool soft_stop() const { return elapsed_ms() >= soft_limit_; }
     bool hard_stop() const { return elapsed_ms() >= hard_limit_; }
+    int soft_limit_ms() const { return soft_limit_; }
+    int hard_limit_ms() const { return hard_limit_; }
 
 private:
     Clock::time_point start_;
@@ -94,6 +113,8 @@ public:
     // Main entry point: run iterative deepening and return the best move.
     Move search(Position& pos, int max_depth = 64, Score* out_score = nullptr, int thread_id = 0);
     void new_game();
+    bool last_mcts_valid() const { return last_mcts_valid_; }
+    const MctsResult& last_mcts_result() const { return last_mcts_result_; }
 
     // Stop the search at the next opportunity.
     void request_stop() { stop_.store(true, std::memory_order_relaxed); }
@@ -126,6 +147,9 @@ private:
     // often carries more tactical meaning than the amazon destination.
     int arrow_history_[2][BOARD_SQ][BOARD_SQ]{};
     int from_arrow_history_[2][BOARD_SQ][BOARD_SQ]{};
+    int butterfly_from_to_[2][BOARD_SQ][BOARD_SQ]{};
+    int butterfly_to_arrow_[2][BOARD_SQ][BOARD_SQ]{};
+    int butterfly_from_arrow_[2][BOARD_SQ][BOARD_SQ]{};
 
     // 鈹€鈹€ LMR table [depth][move_index] 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     // Precomputed reduction amounts (mirrors SF's lmr[][]).
@@ -136,6 +160,8 @@ private:
     // TT move and killers. Mirrors SF's Countermoves.
     Move countermoves_[2][BOARD_SQ][BOARD_SQ]{};
     std::unique_ptr<MovePickerBuffer[]> move_buffers_;
+    MctsResult last_mcts_result_{};
+    bool last_mcts_valid_ = false;
 
     void init_tables();
 
@@ -145,6 +171,7 @@ private:
 
     // Update killer + history after a beta cutoff
     void update_histories(Move m, int depth, Stack* ss, Color us);
+    void update_butterflies(Move m, Color us);
 
     // Periodically check time; sets stop_ flag if over hard limit
     void check_time();

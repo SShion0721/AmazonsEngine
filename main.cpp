@@ -24,9 +24,12 @@
 #include "rays.h"
 #include "bitboard.h"
 #include "line_pattern.h"
+#include "mcts.h"
+#include "policy_prior.h"
 #include "nnue/nnue.h"
 #include <iostream>
 #include <fstream>
+#include <array>
 #include <vector>
 #include <sstream>
 #include <string>
@@ -61,6 +64,9 @@ static std::thread        g_search_thread;
 static int    g_threads      = 1;     // Lazy SMP thread count
 static int    g_move_overhead = 10;   // ms safety buffer for communication delay
 static std::string g_eval_file = "nnue.bin"; // NNUE weight file path
+static std::string g_policy_file = "policy.bin";
+static bool   g_save_policy_visits = false;
+static int    g_policy_visit_topk = 128;
 
 namespace {
 
@@ -201,6 +207,102 @@ bool merge_selfplay_shards(const std::vector<std::filesystem::path>& shards,
 
     std::ofstream out(output_path, std::ios::app | std::ios::binary);
     if (!out)
+        return false;
+
+    std::vector<char> merge_buffer(1 << 20);
+    for (const auto& shard : shards) {
+        std::ifstream part_in(shard, std::ios::binary);
+        if (!part_in)
+            continue;
+
+        while (part_in) {
+            part_in.read(merge_buffer.data(), static_cast<std::streamsize>(merge_buffer.size()));
+            std::streamsize count = part_in.gcount();
+            if (count > 0)
+                out.write(merge_buffer.data(), count);
+        }
+        part_in.close();
+        std::error_code ec;
+        std::filesystem::remove(shard, ec);
+    }
+
+    out.flush();
+    return bool(out);
+}
+
+#pragma pack(push, 1)
+struct PolicyVisitHeader {
+    char magic[8];
+    uint32_t version;
+    uint32_t board_squares;
+    uint32_t max_topk;
+};
+
+struct PolicyVisitFixed {
+    int8_t side;
+    char board[100];
+    int8_t outcome;
+    int16_t score;
+    uint32_t best_move;
+    uint16_t visit_count;
+};
+
+struct PolicyVisitEntry {
+    uint32_t move;
+    uint16_t visits;
+};
+#pragma pack(pop)
+
+struct PolicyVisitRecordMem {
+    int8_t side = 0;
+    std::array<char, BOARD_SQ> board{};
+    int8_t outcome = 0;
+    int16_t score = 0;
+    Move best_move = MOVE_NONE;
+    std::vector<PolicyVisitEntry> visits;
+};
+
+bool write_policy_visit_header(std::ostream& out, int max_topk) {
+    PolicyVisitHeader header{};
+    const char magic[8] = {'A', 'M', 'Z', 'S', 'V', '3', '\0', '\0'};
+    std::memcpy(header.magic, magic, sizeof(header.magic));
+    header.version = 1;
+    header.board_squares = BOARD_SQ;
+    header.max_topk = static_cast<uint32_t>(std::max(1, max_topk));
+    out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    return bool(out);
+}
+
+bool write_policy_visit_record(std::ostream& out, const PolicyVisitRecordMem& rec) {
+    PolicyVisitFixed fixed{};
+    fixed.side = rec.side;
+    std::memcpy(fixed.board, rec.board.data(), rec.board.size());
+    fixed.outcome = rec.outcome;
+    fixed.score = rec.score;
+    fixed.best_move = static_cast<uint32_t>(rec.best_move);
+    fixed.visit_count = static_cast<uint16_t>(std::min<std::size_t>(rec.visits.size(), 65535));
+
+    out.write(reinterpret_cast<const char*>(&fixed), sizeof(fixed));
+    if (fixed.visit_count > 0) {
+        out.write(reinterpret_cast<const char*>(rec.visits.data()),
+                  static_cast<std::streamsize>(fixed.visit_count * sizeof(PolicyVisitEntry)));
+    }
+    return bool(out);
+}
+
+bool merge_policy_visit_shards(const std::vector<std::filesystem::path>& shards,
+                               const std::filesystem::path& output_path,
+                               int max_topk) {
+    if (shards.empty())
+        return true;
+
+    const bool need_header = !std::filesystem::exists(output_path)
+                          || std::filesystem::file_size(output_path) == 0;
+
+    std::ofstream out(output_path, std::ios::app | std::ios::binary);
+    if (!out)
+        return false;
+    if (need_header && !write_policy_visit_header(out, max_topk))
         return false;
 
     std::vector<char> merge_buffer(1 << 20);
@@ -382,6 +484,17 @@ void init_uci_options() {
         return "Failed to load " + g_eval_file + "; using classical eval only";
     });
 
+    add_string_option("PolicyFile", g_policy_file,
+                      [](const std::string& value) -> std::optional<std::string> {
+        g_policy_file = value;
+        const bool loaded = load_policy_prior(g_policy_file);
+        clear_mcts_tree();
+        g_tt.clear();
+        if (loaded)
+            return "AMZPOL1 policy prior loaded from " + g_policy_file;
+        return "Failed to load " + g_policy_file + "; using heuristic prior fallback";
+    });
+
     add_check_option("Use NNUE", false,
                      [](const std::string& value) -> std::optional<std::string> {
         bool enabled = false;
@@ -462,7 +575,54 @@ void init_uci_options() {
         return "Eval Tier set to " + value;
     });
 
-    add_check_option("Use Bounded MoveGen", true,
+    add_string_option("Search Mode", "Match",
+                      [](const std::string& value) -> std::optional<std::string> {
+        std::string lowered = value;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+
+        if (lowered == "fastselfplay" || lowered == "fast") {
+            g_search_mode = SEARCH_MODE_FAST_SELFPLAY;
+            g_teacher_safe_search = false;
+            g_use_bounded_movegen = true;
+            g_use_lmp_pruning = true;
+            g_use_null_move_pruning = false;
+            g_use_move_categories = false;
+            g_use_mcts_root = false;
+            g_use_strong_classical = false;
+            g_eval_tier = EVAL_TIER_FAST;
+        } else if (lowered == "teachersafe" || lowered == "teacher") {
+            g_search_mode = SEARCH_MODE_TEACHER_SAFE;
+            g_teacher_safe_search = true;
+            g_use_bounded_movegen = false;
+            g_use_lmp_pruning = false;
+            g_use_null_move_pruning = false;
+            g_use_move_categories = true;
+            g_use_mcts_root = false;
+            g_use_strong_classical = true;
+            g_eval_tier = EVAL_TIER_STRONG;
+        } else if (lowered == "match") {
+            g_search_mode = SEARCH_MODE_MATCH;
+            g_teacher_safe_search = false;
+            g_use_bounded_movegen = false;
+            g_use_lmp_pruning = true;
+            g_use_null_move_pruning = false;
+            g_use_move_categories = true;
+            g_use_mcts_root = true;
+            g_use_strong_classical = true;
+            g_eval_tier = EVAL_TIER_MIXED;
+        } else {
+            return "Invalid Search Mode value: " + value
+                 + " (expected FastSelfplay, TeacherSafe, or Match)";
+        }
+
+        g_tt.clear();
+        clear_eval_cache();
+        clear_mcts_tree();
+        return "Search Mode set to " + value + "; recommended pruning/eval defaults applied";
+    });
+
+    add_check_option("Use Bounded MoveGen", false,
                      [](const std::string& value) -> std::optional<std::string> {
         bool enabled = false;
         if (!try_parse_bool(value, enabled))
@@ -523,6 +683,122 @@ void init_uci_options() {
                        : "Amazons move categories disabled";
     });
 
+    add_check_option("Use Policy Prior", true,
+                     [](const std::string& value) -> std::optional<std::string> {
+        bool enabled = false;
+        if (!try_parse_bool(value, enabled))
+            return "Invalid Use Policy Prior value: " + value;
+
+        g_use_policy_prior = enabled;
+        clear_mcts_tree();
+        return enabled ? "Policy prior enabled for PUCT when AMZPOL1 is loaded"
+                       : "Policy prior disabled; PUCT uses heuristic prior";
+    });
+
+    add_spin_option("Policy Prior Blend", 70, 0, 100,
+                    [](const std::string& value) -> std::optional<std::string> {
+        int blend = 0;
+        if (!try_parse_int(value, blend)) return "Invalid Policy Prior Blend value: " + value;
+        g_policy_prior_blend = std::clamp(blend, 0, 100);
+        clear_mcts_tree();
+        return "Policy Prior Blend set to " + std::to_string(g_policy_prior_blend) + "%";
+    });
+
+    add_check_option("Save Policy Visits", false,
+                     [](const std::string& value) -> std::optional<std::string> {
+        bool enabled = false;
+        if (!try_parse_bool(value, enabled))
+            return "Invalid Save Policy Visits value: " + value;
+        g_save_policy_visits = enabled;
+        return enabled ? "Match selfplay AMZSV3 policy-visit recording enabled"
+                       : "Match selfplay AMZSV3 policy-visit recording disabled";
+    });
+
+    add_spin_option("Policy Visit TopK", 128, 1, 512,
+                    [](const std::string& value) -> std::optional<std::string> {
+        int topk = 0;
+        if (!try_parse_int(value, topk)) return "Invalid Policy Visit TopK value: " + value;
+        g_policy_visit_topk = std::clamp(topk, 1, 512);
+        return "Policy Visit TopK set to " + std::to_string(g_policy_visit_topk);
+    });
+
+    add_check_option("Use Soft Tail Search", true,
+                     [](const std::string& value) -> std::optional<std::string> {
+        bool enabled = false;
+        if (!try_parse_bool(value, enabled))
+            return "Invalid Use Soft Tail Search value: " + value;
+
+        g_use_soft_tail_search = enabled;
+        g_tt.clear();
+        return enabled ? "Soft tail search enabled"
+                       : "Soft tail search disabled; top-K behaves as hard truncation";
+    });
+
+    add_check_option("Use MCTS Root", true,
+                     [](const std::string& value) -> std::optional<std::string> {
+        bool enabled = false;
+        if (!try_parse_bool(value, enabled))
+            return "Invalid Use MCTS Root value: " + value;
+
+        g_use_mcts_root = enabled;
+        clear_mcts_tree();
+        return enabled ? "MCTS root enabled for Match mode"
+                       : "MCTS root disabled";
+    });
+
+    add_spin_option("MCTS Time Share", 75, 1, 100,
+                    [](const std::string& value) -> std::optional<std::string> {
+        int share = 0;
+        if (!try_parse_int(value, share)) return "Invalid MCTS Time Share value: " + value;
+        g_mcts_time_share = std::clamp(share, 1, 100);
+        return "MCTS Time Share set to " + std::to_string(g_mcts_time_share) + "%";
+    });
+
+    add_spin_option("MCTS Min Time", 80, 1, 5000,
+                    [](const std::string& value) -> std::optional<std::string> {
+        int ms = 0;
+        if (!try_parse_int(value, ms)) return "Invalid MCTS Min Time value: " + value;
+        g_mcts_min_time_ms = std::clamp(ms, 1, 5000);
+        return "MCTS Min Time set to " + std::to_string(g_mcts_min_time_ms) + " ms";
+    });
+
+    add_spin_option("MCTS Cpuct", 120, 1, 1000,
+                    [](const std::string& value) -> std::optional<std::string> {
+        int cpuct = 0;
+        if (!try_parse_int(value, cpuct)) return "Invalid MCTS Cpuct value: " + value;
+        g_mcts_cpuct = std::clamp(cpuct, 1, 1000);
+        clear_mcts_tree();
+        return "MCTS Cpuct set to " + std::to_string(g_mcts_cpuct) + " (divided by 100)";
+    });
+
+    add_spin_option("MCTS Threads", 1, 1, 128,
+                    [](const std::string& value) -> std::optional<std::string> {
+        int threads = 0;
+        if (!try_parse_int(value, threads)) return "Invalid MCTS Threads value: " + value;
+        g_mcts_threads = std::clamp(threads, 1, 128);
+        return "MCTS Threads set to " + std::to_string(g_mcts_threads);
+    });
+
+    add_check_option("Use Tree Reuse", true,
+                     [](const std::string& value) -> std::optional<std::string> {
+        bool enabled = false;
+        if (!try_parse_bool(value, enabled))
+            return "Invalid Use Tree Reuse value: " + value;
+        g_use_tree_reuse = enabled;
+        if (!enabled)
+            clear_mcts_tree();
+        return enabled ? "MCTS root tree reuse enabled"
+                       : "MCTS root tree reuse disabled and cleared";
+    });
+
+    add_spin_option("AB Verify TopN", 6, 0, 64,
+                    [](const std::string& value) -> std::optional<std::string> {
+        int topn = 0;
+        if (!try_parse_int(value, topn)) return "Invalid AB Verify TopN value: " + value;
+        g_ab_verify_topn = std::clamp(topn, 0, 64);
+        return "AB Verify TopN set to " + std::to_string(g_ab_verify_topn);
+    });
+
     add_check_option("Teacher Safe Search", false,
                      [](const std::string& value) -> std::optional<std::string> {
         bool enabled = false;
@@ -530,6 +806,23 @@ void init_uci_options() {
             return "Invalid Teacher Safe Search value: " + value;
 
         g_teacher_safe_search = enabled;
+        if (enabled) {
+            g_search_mode = SEARCH_MODE_TEACHER_SAFE;
+            g_use_bounded_movegen = false;
+            g_use_lmp_pruning = false;
+            g_use_null_move_pruning = false;
+            g_use_mcts_root = false;
+            g_use_strong_classical = true;
+            g_eval_tier = EVAL_TIER_STRONG;
+        } else if (g_search_mode == SEARCH_MODE_TEACHER_SAFE) {
+            g_search_mode = SEARCH_MODE_MATCH;
+            g_use_bounded_movegen = false;
+            g_use_lmp_pruning = true;
+            g_use_null_move_pruning = false;
+            g_use_mcts_root = true;
+            g_use_strong_classical = true;
+            g_eval_tier = EVAL_TIER_MIXED;
+        }
         g_tt.clear();
         return enabled ? "Teacher safe search enabled; selective pruning reduced"
                        : "Teacher safe search disabled";
@@ -732,13 +1025,24 @@ static void cmd_go(std::istringstream& is) {
             : 0;
         g_searcher.node_limit = per_thread_node_limit;
 
-        g_go_helpers.start_searching(*root_pos, g_searcher.time_man, depth_limit, per_thread_node_limit);
+        const bool root_mcts_likely = g_search_mode == SEARCH_MODE_MATCH
+                                   && g_use_mcts_root
+                                   && !g_teacher_safe_search
+                                   && node_limit == 0
+                                   && depth_limit >= 8
+                                   && root_pos->bb_arrow.popcount() < 56
+                                   && g_searcher.time_man.soft_limit_ms() >= g_mcts_min_time_ms
+                                   && g_searcher.time_man.soft_limit_ms() <= 30000;
+        if (!root_mcts_likely)
+            g_go_helpers.start_searching(*root_pos, g_searcher.time_man, depth_limit, per_thread_node_limit);
 
         g_searcher.silent = false;
         g_searcher.search(*root_pos, depth_limit, nullptr, 0);
 
-        g_go_helpers.request_stop();
-        g_go_helpers.wait_for_search_finished();
+        if (!root_mcts_likely) {
+            g_go_helpers.request_stop();
+            g_go_helpers.wait_for_search_finished();
+        }
     });
 }
 
@@ -765,6 +1069,11 @@ int main() {
         std::cout << "info string Failed to load " << g_eval_file
                   << ", using classical eval only.\n";
     }
+    if (load_policy_prior(g_policy_file))
+        std::cout << "info string AMZPOL1 policy prior loaded successfully from " << g_policy_file << ".\n";
+    else
+        std::cout << "info string Failed to load " << g_policy_file
+                  << ", using heuristic policy prior fallback.\n";
     NNUE::g_accumulator_enabled = g_use_nnue && g_nnue_loaded;
     g_pos.set_startpos();
 
@@ -801,6 +1110,7 @@ int main() {
             stop_search_and_join();
             g_tt.clear();
             clear_eval_cache();
+            clear_mcts_tree();
             g_searcher.new_game();
             g_go_helpers.new_game();
             g_pos.set_startpos();
@@ -861,6 +1171,8 @@ int main() {
                       << "NNUE      : " << n
                       << nnue_status << "\n"
                       << "NNUE fmt  : " << NNUE::weight_format() << "\n"
+                      << "Policy fmt: " << policy_prior_format()
+                      << (g_use_policy_prior ? "" : " (disabled)") << "\n"
                       << "Global    :";
             for (int i = 0; i < NNUE::GLOBAL_FEATURE_SIZE; ++i)
                 std::cout << ' ' << int(ei.global.v[i]);
@@ -962,6 +1274,7 @@ int main() {
             }
 
             const std::filesystem::path output_path("selfplay_data.bin");
+            const std::filesystem::path policy_output_path("selfplay_policy_visits.amzsv3");
             const auto stale_shards = find_selfplay_shards(output_path);
             if (!stale_shards.empty()) {
                 std::cout << "info string Found " << stale_shards.size()
@@ -974,6 +1287,21 @@ int main() {
                 }
                 std::cout << "info string Recovered unfinished selfplay data into "
                           << output_path.string() << "\n";
+            }
+            if (g_save_policy_visits) {
+                const auto stale_policy_shards = find_selfplay_shards(policy_output_path);
+                if (!stale_policy_shards.empty()) {
+                    std::cout << "info string Found " << stale_policy_shards.size()
+                              << " unfinished AMZSV3 shard(s); recovering before new run...\n";
+                    if (!merge_policy_visit_shards(stale_policy_shards,
+                                                   policy_output_path,
+                                                   g_policy_visit_topk)) {
+                        std::cout << "info string Failed to recover unfinished AMZSV3 shards; "
+                                     "selfplay aborted.\n";
+                        std::cout.flush();
+                        continue;
+                    }
+                }
             }
 
             g_selfplay_interrupt.store(false, std::memory_order_relaxed);
@@ -990,8 +1318,10 @@ int main() {
             #pragma pack(pop)
 
             std::vector<std::filesystem::path> part_paths(game_threads);
+            std::vector<std::filesystem::path> policy_part_paths(game_threads);
             for (int i = 0; i < game_threads; ++i) {
                 part_paths[i] = output_path.string() + ".part" + std::to_string(i) + ".tmp";
+                policy_part_paths[i] = policy_output_path.string() + ".part" + std::to_string(i) + ".tmp";
             }
 
             std::atomic<int> next_game{0};
@@ -1059,6 +1389,17 @@ int main() {
                               << part_paths[thread_id].string() << "\n";
                     return;
                 }
+                std::unique_ptr<std::ofstream> policy_out;
+                if (g_save_policy_visits) {
+                    policy_out = std::make_unique<std::ofstream>(policy_part_paths[thread_id],
+                                                                 std::ios::binary | std::ios::trunc);
+                    if (!*policy_out) {
+                        std::lock_guard<std::mutex> lock(print_mutex);
+                        std::cout << "\ninfo string Failed to open AMZSV3 shard: "
+                                  << policy_part_paths[thread_id].string() << "\n";
+                        return;
+                    }
+                }
                 TranspositionTable local_tt(hash_size);
                 Searcher local_searcher(local_tt);
                 local_searcher.silent = true;
@@ -1120,8 +1461,12 @@ int main() {
 
                     std::vector<GameRecord> records;
                     records.reserve(128);
+                    std::vector<PolicyVisitRecordMem> policy_records;
+                    if (g_save_policy_visits)
+                        policy_records.reserve(128);
                     int white_result = 0;
                     bool interrupted_game = false;
+                    bool discard_game = false;
 
                     while (true) {
                         if (should_interrupt_selfplay()) {
@@ -1143,10 +1488,21 @@ int main() {
                             ? std::max<uint64_t>(1, nodes_per_move / static_cast<uint64_t>(std::max(1, search_threads)))
                             : 0;
                         local_searcher.node_limit = per_thread_nodes;
-                        local_helpers.start_searching(*local_pos, local_searcher.time_man, max_depth, per_thread_nodes);
+                        const bool root_mcts_likely = g_search_mode == SEARCH_MODE_MATCH
+                                                   && g_use_mcts_root
+                                                   && !g_teacher_safe_search
+                                                   && per_thread_nodes == 0
+                                                   && max_depth >= 8
+                                                   && move_time >= g_mcts_min_time_ms
+                                                   && move_time <= 30000
+                                                   && local_pos->bb_arrow.popcount() < 56;
+                        if (!root_mcts_likely)
+                            local_helpers.start_searching(*local_pos, local_searcher.time_man, max_depth, per_thread_nodes);
                         Move best = local_searcher.search(*local_pos, max_depth, &search_score);
-                        local_helpers.request_stop();
-                        local_helpers.wait_for_search_finished();
+                        if (!root_mcts_likely) {
+                            local_helpers.request_stop();
+                            local_helpers.wait_for_search_finished();
+                        }
 
                         if (should_interrupt_selfplay()) {
                             interrupted_game = true;
@@ -1155,6 +1511,16 @@ int main() {
 
                         if (best == MOVE_NONE) {
                             white_result = (local_pos->side_to_move == WHITE) ? -1 : 1;
+                            break;
+                        }
+                        if (!is_pseudo_legal(*local_pos, best)) {
+                            std::lock_guard<std::mutex> lock(print_mutex);
+                            std::cout << "\ninfo string Illegal selfplay bestmove "
+                                      << move_to_str(best)
+                                      << " at game " << g
+                                      << " ply " << local_pos->ply
+                                      << "; discarding this game.\n";
+                            discard_game = true;
                             break;
                         }
 
@@ -1168,17 +1534,74 @@ int main() {
                             rec.board[sq] = static_cast<char>('0' + local_pos->board[sq]);
                         records.push_back(rec);
 
+                        if (g_save_policy_visits
+                            && local_searcher.last_mcts_valid()
+                            && !local_searcher.last_mcts_result().root_moves.empty()) {
+                            PolicyVisitRecordMem prec;
+                            prec.side = rec.side;
+                            prec.outcome = 0;
+                            prec.score = rec.score;
+                            prec.best_move = best;
+                            prec.board = {};
+                            for (int sq = 0; sq < BOARD_SQ; ++sq)
+                                prec.board[sq] = rec.board[sq];
+
+                            std::vector<MctsRootMove> root_moves = local_searcher.last_mcts_result().root_moves;
+                            root_moves.erase(std::remove_if(root_moves.begin(), root_moves.end(),
+                                            [&](const MctsRootMove& rm) {
+                                                return rm.move == MOVE_NONE
+                                                    || rm.visits <= 0
+                                                    || !is_pseudo_legal(*local_pos, rm.move);
+                                            }),
+                                            root_moves.end());
+                            std::sort(root_moves.begin(), root_moves.end(),
+                                      [](const MctsRootMove& a, const MctsRootMove& b) {
+                                          if (a.visits != b.visits)
+                                              return a.visits > b.visits;
+                                          return a.mean > b.mean;
+                                      });
+
+                            const int keep = std::min<int>(g_policy_visit_topk, root_moves.size());
+                            prec.visits.reserve(keep);
+                            for (int i = 0; i < keep; ++i) {
+                                PolicyVisitEntry entry{};
+                                entry.move = static_cast<uint32_t>(root_moves[i].move);
+                                entry.visits = static_cast<uint16_t>(
+                                    std::clamp(root_moves[i].visits, 0, 65535));
+                                prec.visits.push_back(entry);
+                            }
+                            if (!prec.visits.empty())
+                                policy_records.push_back(std::move(prec));
+                        }
+
                         local_pos->do_move(best);
                     }
 
                     if (interrupted_game)
                         break;
+                    if (discard_game)
+                        continue;
 
                     for (auto& rec : records) {
                         rec.outcome = (rec.side == 0)
                             ? static_cast<int8_t>(white_result)
                             : static_cast<int8_t>(-white_result);
                     }
+                    for (auto& rec : policy_records) {
+                        rec.outcome = (rec.side == 0)
+                            ? static_cast<int8_t>(white_result)
+                            : static_cast<int8_t>(-white_result);
+                        if (policy_out && !write_policy_visit_record(*policy_out, rec)) {
+                            std::lock_guard<std::mutex> lock(print_mutex);
+                            std::cout << "\ninfo string Failed while writing AMZSV3 shard: "
+                                      << policy_part_paths[thread_id].string() << "\n";
+                            request_selfplay_interrupt();
+                            interrupted_game = true;
+                            break;
+                        }
+                    }
+                    if (interrupted_game)
+                        break;
 
                     write_buffer.insert(write_buffer.end(), records.begin(), records.end());
                     if (write_buffer.size() >= kBufferedRecords) {
@@ -1203,6 +1626,8 @@ int main() {
 
             const bool interrupted = should_interrupt_selfplay();
             const bool merge_ok = merge_selfplay_shards(part_paths, output_path);
+            const bool policy_merge_ok = !g_save_policy_visits
+                || merge_policy_visit_shards(policy_part_paths, policy_output_path, g_policy_visit_topk);
             g_selfplay_active.store(false, std::memory_order_relaxed);
 
             const int done = completed_games.load(std::memory_order_relaxed);
@@ -1212,12 +1637,18 @@ int main() {
             if (!merge_ok) {
                 std::cout << "info string Failed to merge one or more selfplay shard files.\n";
             }
+            if (!policy_merge_ok) {
+                std::cout << "info string Failed to merge one or more AMZSV3 policy visit shard files.\n";
+            }
             if (interrupted) {
                 std::cout << "Selfplay interrupted. " << done
                           << " completed games merged into " << output_path.string() << "\n";
             } else {
                 std::cout << "Selfplay complete! " << done
                           << " games saved to " << output_path.string() << "\n";
+                if (g_save_policy_visits)
+                    std::cout << "AMZSV3 policy visits saved to "
+                              << policy_output_path.string() << "\n";
             }
         }
 

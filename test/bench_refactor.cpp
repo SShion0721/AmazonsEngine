@@ -57,6 +57,9 @@ int main() {
     int history[2][BOARD_SQ][BOARD_SQ]{};
     int arrow_history[2][BOARD_SQ][BOARD_SQ]{};
     int from_arrow_history[2][BOARD_SQ][BOARD_SQ]{};
+    int butterfly_from_to[2][BOARD_SQ][BOARD_SQ]{};
+    int butterfly_to_arrow[2][BOARD_SQ][BOARD_SQ]{};
+    int butterfly_from_arrow[2][BOARD_SQ][BOARD_SQ]{};
     auto picker_buffer = std::make_unique<MovePickerBuffer>();
     Stack stack[2]{};
     Stack* ss = stack + 1;
@@ -71,6 +74,9 @@ int main() {
                               history,
                               arrow_history,
                               from_arrow_history,
+                              butterfly_from_to,
+                              butterfly_to_arrow,
+                              butterfly_from_arrow,
                               MOVE_NONE,
                               *picker_buffer,
                               256);

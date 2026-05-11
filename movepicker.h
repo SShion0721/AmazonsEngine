@@ -19,6 +19,7 @@ struct ScoredMove {
     Move move;
     int score;
     int category;
+    bool tail;
 };
 
 struct MovePickerBuffer {
@@ -35,6 +36,9 @@ public:
                const int (&history)[2][BOARD_SQ][BOARD_SQ],
                const int (&arrow_history)[2][BOARD_SQ][BOARD_SQ],
                const int (&from_arrow_history)[2][BOARD_SQ][BOARD_SQ],
+               const int (&butterfly_from_to)[2][BOARD_SQ][BOARD_SQ],
+               const int (&butterfly_to_arrow)[2][BOARD_SQ][BOARD_SQ],
+               const int (&butterfly_from_arrow)[2][BOARD_SQ][BOARD_SQ],
                Move countermove,
                MovePickerBuffer& buffer,
                int top_k)
@@ -44,6 +48,9 @@ public:
           history_(history),
           arrow_history_(arrow_history),
           from_arrow_history_(from_arrow_history),
+          butterfly_from_to_(butterfly_from_to),
+          butterfly_to_arrow_(butterfly_to_arrow),
+          butterfly_from_arrow_(butterfly_from_arrow),
           counter_(countermove),
           buffer_(buffer),
           top_k_(top_k),
@@ -55,6 +62,8 @@ public:
     int tried_count() const { return tried_count_; }
     int last_category_score() const { return last_category_score_; }
     bool last_category_known() const { return last_category_known_; }
+    bool last_tail() const { return last_tail_; }
+    bool last_tail_known() const { return last_tail_known_; }
 
 private:
     enum Stage {
@@ -73,6 +82,9 @@ private:
     const int (&history_)[2][BOARD_SQ][BOARD_SQ];
     const int (&arrow_history_)[2][BOARD_SQ][BOARD_SQ];
     const int (&from_arrow_history_)[2][BOARD_SQ][BOARD_SQ];
+    const int (&butterfly_from_to_)[2][BOARD_SQ][BOARD_SQ];
+    const int (&butterfly_to_arrow_)[2][BOARD_SQ][BOARD_SQ];
+    const int (&butterfly_from_arrow_)[2][BOARD_SQ][BOARD_SQ];
     Move counter_;
     MovePickerBuffer& buffer_;
     int top_k_;
@@ -84,6 +96,8 @@ private:
     Move excluded_[4] = {MOVE_NONE, MOVE_NONE, MOVE_NONE, MOVE_NONE};
     int last_category_score_ = 0;
     bool last_category_known_ = false;
+    bool last_tail_ = false;
+    bool last_tail_known_ = false;
 
     bool is_excluded(Move m) const {
         for (int i = 0; i < excluded_count_; ++i)
@@ -98,6 +112,8 @@ private:
         remember_tried(m);
         last_category_known_ = false;
         last_category_score_ = 0;
+        last_tail_known_ = false;
+        last_tail_ = false;
     }
 
     void remember_tried(Move m) {

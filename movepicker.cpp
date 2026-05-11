@@ -6,7 +6,7 @@
 #include "bitboard.h"
 #include <cstdlib>
 
-bool g_use_bounded_movegen = true;
+bool g_use_bounded_movegen = false;
 int g_bounded_dest_cap = 16;
 int g_bounded_arrow_cap = 12;
 
@@ -36,6 +36,10 @@ void insert_top_square(ScoredSquare* out, int& count, int cap, ScoredSquare valu
 
 int queen_mobility_from(Square sq, Bitboard128 occ) {
     return (get_queen_attacks(sq, occ) & ~occ).popcount();
+}
+
+int relative_history_score(int history, int butterfly) {
+    return history + (history * 1024) / (butterfly + 64);
 }
 
 int blocks_opponent_with_square(const Position& pos, Square blocker, Bitboard128 occ_without_blocker) {
@@ -163,7 +167,7 @@ int generate_bounded_moves(const Position& pos,
                 int score = arrows[a].score;
                 if (g_use_move_categories)
                     score += cheap_category_score(pos, m);
-                out[count++] = {m, score, 0};
+                out[count++] = {m, score, 0, false};
             }
 
             occ.clear(to);
@@ -295,32 +299,58 @@ Move MovePicker::next_move() {
             const int raw_count = generate_moves(pos_, buffer_.raw, MAX_LEGAL_MOVES);
             for (int i = 0; i < raw_count; ++i) {
                 const Move m = buffer_.raw[i];
-                int s = history_[us][move_from(m)][move_to(m)]
-                      + arrow_history_[us][move_to(m)][move_arrow(m)]
-                      + from_arrow_history_[us][move_from(m)][move_arrow(m)];
+                const Square from = move_from(m);
+                const Square to = move_to(m);
+                const Square arrow = move_arrow(m);
+                int s = 2 * relative_history_score(history_[us][from][to],
+                                                   butterfly_from_to_[us][from][to])
+                      + 3 * relative_history_score(arrow_history_[us][to][arrow],
+                                                   butterfly_to_arrow_[us][to][arrow])
+                      + 2 * relative_history_score(from_arrow_history_[us][from][arrow],
+                                                   butterfly_from_arrow_[us][from][arrow]);
                 if (g_use_move_categories)
                     s += cheap_category_score(pos_, m);
-                buffer_.moves[move_count_++] = {m, s, 0};
+                buffer_.moves[move_count_++] = {m, s, 0, false};
             }
         }
 
         const auto better = [](const ScoredMove& a, const ScoredMove& b) {
             return a.score > b.score;
         };
+
+        for (int i = 0; i < move_count_; ++i)
+            buffer_.moves[i].tail = false;
+
+        int prefix_count = move_count_;
+        const bool soft_tail = !bounded
+                            && g_use_soft_tail_search
+                            && !g_teacher_safe_search
+                            && top_k_ > 0
+                            && top_k_ < move_count_;
         if (top_k_ > 0 && move_count_ > top_k_) {
             std::nth_element(buffer_.moves, buffer_.moves + top_k_, buffer_.moves + move_count_, better);
-            move_count_ = top_k_;
+            if (soft_tail) {
+                prefix_count = top_k_;
+                for (int i = prefix_count; i < move_count_; ++i)
+                    buffer_.moves[i].tail = true;
+            } else {
+                move_count_ = top_k_;
+                prefix_count = move_count_;
+            }
         }
 
         if (g_use_move_categories) {
-            for (int i = 0; i < move_count_; ++i) {
+            const int category_count = soft_tail ? prefix_count : move_count_;
+            for (int i = 0; i < category_count; ++i) {
                 const int category = amazon_move_category_score(pos_, buffer_.moves[i].move, ss_);
                 buffer_.moves[i].category = category;
                 buffer_.moves[i].score += category;
             }
         }
 
-        std::sort(buffer_.moves, buffer_.moves + move_count_, better);
+        std::sort(buffer_.moves, buffer_.moves + prefix_count, better);
+        if (soft_tail)
+            std::sort(buffer_.moves + prefix_count, buffer_.moves + move_count_, better);
 
         move_idx_ = 0;
         stage_ = STAGE_YIELD;
@@ -334,6 +364,8 @@ Move MovePicker::next_move() {
             if (is_excluded(m)) continue;
             last_category_score_ = sm.category;
             last_category_known_ = true;
+            last_tail_ = sm.tail;
+            last_tail_known_ = true;
             remember_tried(m);
             return m;
         }

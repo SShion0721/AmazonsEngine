@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -469,6 +469,10 @@ header h1 {
                 <input type="checkbox" id="auto-play" style="accent-color: var(--accent);">
                 引擎自动应答（人机对弈）
             </label>
+            <label class="check-row">
+                <input type="checkbox" id="flip-board" onchange="toggleFlip()" style="accent-color: var(--accent);">
+                翻转棋盘
+            </label>
         </div>
 
         <div class="panel-card">
@@ -516,12 +520,18 @@ let legalMoveTargets = [];
 let legalArrowTargets = [];
 let uciOptions = [];
 let engineState = null;
+let isFlipped = false;
 
 const thinkTimeSlider = document.getElementById('think-time');
 const thinkTimeValue = document.getElementById('think-time-value');
 thinkTimeSlider.addEventListener('input', () => {
     thinkTimeValue.textContent = (thinkTimeSlider.value / 1000).toFixed(1) + ' 秒';
 });
+
+function toggleFlip() {
+    isFlipped = document.getElementById('flip-board').checked;
+    renderBoard();
+}
 
 function sqRow(sq) { return Math.floor(sq / 10); }
 function sqCol(sq) { return sq % 10; }
@@ -591,7 +601,8 @@ function renderBoard() {
     const container = document.getElementById('board');
     container.innerHTML = '';
 
-    for (let visualRow = 0; visualRow < 10; visualRow += 1) {
+    for (let i = 0; i < 10; i += 1) {
+        const visualRow = isFlipped ? 9 - i : i;
         const rank = 10 - visualRow;
         const boardRow = rank - 1;
 
@@ -600,7 +611,8 @@ function renderBoard() {
         rankLabel.textContent = rank;
         container.appendChild(rankLabel);
 
-        for (let col = 0; col < 10; col += 1) {
+        for (let j = 0; j < 10; j += 1) {
+            const col = isFlipped ? 9 - j : j;
             const sq = makeSq(boardRow, col);
             const cell = document.createElement('div');
             cell.className = 'cell ' + (((boardRow + col) % 2 === 0) ? 'light' : 'dark');
@@ -626,7 +638,8 @@ function renderBoard() {
     const corner = document.createElement('div');
     corner.className = 'file-label';
     container.appendChild(corner);
-    for (let col = 0; col < 10; col += 1) {
+    for (let j = 0; j < 10; j += 1) {
+        const col = isFlipped ? 9 - j : j;
         const fileLabel = document.createElement('div');
         fileLabel.className = 'file-label';
         fileLabel.textContent = COLS[col];
