@@ -1,414 +1,429 @@
-# AmazonsEngine
-
-10x10 亚马逊棋引擎。当前版本已经不是单纯 Stockfish-like AlphaBeta，而是：
-
-- PEXT bitboard 走法生成
-- cache-line cluster TT
-- 分层 Classical2 评估
-- AMZNUE2 / NNUE-v2 接口
-- Match 模式 root MCTS/UCT + AB verify
-- FastSelfplay / TeacherSafe / Match 三套搜索模式
-
-## 构建
-
-推荐使用 CMake Release：
-
-```powershell
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j
-```
-
-Release 会启用：
-
-- MSVC: `/O2 /DNDEBUG /GL /arch:AVX2`
-- GCC/Clang: `-O3 -DNDEBUG -march=native -flto -funroll-loops`
-
-## 常用命令
-
-| 命令 | 说明 |
-|---|---|
-| `uci` | 输出 UCI 选项 |
-| `isready` | 同步 |
-| `ucinewgame` | 清 TT / eval cache / history |
-| `d` | 打印当前棋盘 |
-| `eval` | 打印当前评估拆解 |
-| `perft <N>` | 完整走法生成节点数 |
-| `go depth <N>` | AlphaBeta 深度搜索 |
-| `go movetime <ms>` | 时间搜索；Match 模式开中局会优先走 MCTS root |
-| `selfplay <games> <depth> <ms> <gameThreads> <hashMB> <searchThreads> [nodes]` | 生成自博数据 |
-
-## 搜索模式
-
-### FastSelfplay
-
-速度优先，用于快速生成局面分布。
-
-推荐配置：
-
-```text
-setoption name Search Mode value FastSelfplay
-setoption name Use NNUE value false
-selfplay 20000000 4 1 15 1 1
-```
-
-该模式会启用快速评估、bounded movegen，并关闭强 move categories / MCTS。它追求吞吐，不适合当强 teacher。
-
-### TeacherSafe
-
-训练强标签优先。
-
-推荐配置：
-
-```text
-setoption name Search Mode value TeacherSafe
-setoption name Use NNUE value false
-selfplay 100000 4 30 8 8 1
-```
-
-该模式关闭硬截断、NMP、LMP、MCTS，使用强 Classical2。速度慢是正常的。
-
-### Match
-
-实战默认模式。
-
-```text
-setoption name Search Mode value Match
-go movetime 1000
-```
-
-开中局默认使用 root-only MCTS/UCT，后期或低时间/低深度回退到 AlphaBeta。MCTS 后会对前若干候选做浅层 AB verify。
-
-## 当前评估体系
-
-当前评估不是单一函数，而是分层路径：
-
-```text
-evaluate()
-  -> evaluate_with_tier()
-       -> Fast legacy eval
-       -> Mixed selective eval
-       -> Strong Classical2
-       -> optional AMZNUE2 residual
-
-MCTS root / rollout
-  -> ChampionEvalFast
-  -> Champion move prior
-```
-
-### 1. Fast legacy eval
-
-用于 FastSelfplay、浅层非关键节点、NNUE/Strong Classical 都关闭时。
-
-组成：
-
-```text
-legacy = TerritoryWeight * king-flood territory
-       + MobilityWeight  * queen mobility
-       + legacy partition bonus
-```
-
-特点：
-
-- 很快，避免 queen/king distance 全量计算。
-- 适合快速自博吞吐。
-- 棋力不如 Strong Classical2。
-
-### 2. Strong Classical2
-
-这是当前主要强评估，结果为 side-to-move POV。
-
-先计算双方距离场：
-
-- `qdist[2][100]`: queen-distance，多源 BFS，扩展使用 `get_queen_attacks()`。
-- `kdist[2][100]`: king-distance，bitboard wavefront 扩展。
-
-然后得到以下白方视角子项：
-
-| 子项 | 含义 |
-|---|---|
-| `t1` | queen-distance territory：空格离哪方 queen 距离更近 |
-| `t2` | king-distance territory：空格离哪方 king 距离更近 |
-| `p1` | queen-distance closeness：越近权重越高 |
-| `p2` | king-distance closeness / reachability 修正 |
-| `m` | per-amazon mobility/enclosure：局部机动性和被困惩罚 |
-| `partition` | 连通块/分区评估 |
-| `mobility` | PEXT queen mobility 总差 |
-
-阶段权重按箭数变化：
-
-```text
-phase 0: arrows <= 14
-phase 1: arrows <= 25
-phase 2: arrows <= 40
-phase 3: arrows <= 55
-phase 4: arrows <= 63
-phase 5: arrows >  63
-```
-
-越到后期，`t2`、`m`、`partition` 权重越高；开局更偏 `t1`。
-
-### 3. Partition fast-track
-
-当箭数较多时，会尝试检查棋盘是否已经完全分区：
-
-```text
-if no connected component contains both white and black amazons:
-    eval = large side-relative component-space score
-```
-
-这避免后期在已经分开的局面里继续做大量无意义搜索。
-
-小单边区域还会尝试 exact fill solver：
-
-```text
-if component contains only one side
-and empty_count <= 14:
-    exact = local maximum-fill search with memo
-else:
-    fallback = simple component estimate
-```
-
-这个 solver 只在小 component 上工作。它会把局部区域内的 amazon 位置和占用位作为 memo key，精确搜索“这一块区域最终还能走几步”。如果局部分支爆炸超过预算，会自动回退到原来的估值，避免拖慢中盘。
-
-### 4. Eval cache
-
-Strong Classical2 的距离场和 global features 不在 `do_move()` 里维护，而是在 evaluate cache miss 时计算。
-
-当前 cache 是：
-
-```text
-thread_local direct-mapped eval cache
-size = 1 << 15
-key  = position zobrist
-data = EvalInfo { breakdown, global[32], phase_bucket }
-```
-
-好处：
-
-- 多线程 selfplay 不抢同一个全局 eval cache。
-- 关闭 Strong Classical / NNUE 时不会误触发重评估。
-
-### 5. AMZNUE2 / Fusion NNUE
-
-当前旧 300-only NNUE 已废弃。加载器只接受 AMZNUE2 格式。
-
-NNUE active 条件：
-
-```text
-Use NNUE = true
-and AMZNUE2 weights loaded
-```
-
-推理路径：
-
-```text
-classical = Classical2 or legacy
-nnue_eval = AMZNUE2(base_acc, line_acc, global[32], phase_bucket)
-
-if Use Pure NNUE:
-    return nnue_eval
-else if Use Residual NNUE:
-    return classical + nnue_eval
-else:
-    return classical
-```
-
-增量 accumulator：
-
-```text
-base[2][512]
-line[2][64]
-line_code[2][58]
-```
-
-`do_move()` 只在 NNUE active 时复制/更新 accumulator，避免 `Use NNUE=false` 的 selfplay 被拖慢。
-
-### 6. ChampionEvalFast
-
-这是给 MCTS root / rollout / prior 用的轻量冠军式评估，不直接替代 Classical2。
-
-组成：
-
-```text
-ChampionEvalFast =
-    phase_weighted T1 queen territory
-  + phase_weighted T2 king territory
-  + local mobility / enclosure
-```
-
-它的目标不是比 Classical2 更准，而是：
-
-- 给 MCTS rollout leaf 一个稳定、便宜的局面值。
-- 给 root candidate 一个“空间切割/封锁”风格 prior。
-- 避免 MCTS 变成纯随机 playout。
-
-Move prior 会考虑：
-
-- 移动后自身 mobility 是否提升。
-- 箭是否邻近敌方 amazon。
-- 箭是否减少敌方 queen mobility。
-- 箭是否打在低邻居数 chokepoint。
-- 是否自困。
-
-## evaluate_search 的选择逻辑
-
-搜索中不是每个节点都强评估：
-
-```text
-if Strong Classical disabled and NNUE inactive:
-    fast legacy eval
-
-if Eval Tier = Strong or NNUE active:
-    Strong Classical2 / Fusion
-
-if Eval Tier = Fast:
-    fast legacy eval
-
-if Eval Tier = Mixed:
-    root / PV / depth >= 3 / arrows >= 56 -> Strong
-    otherwise first use Fast
-    if Fast score near alpha/beta window -> Strong re-eval
-```
-
-这个设计是为了避免每个叶子都算 queen/king distance，同时保留关键节点的评估质量。
-
-## MCTS/AB 混合搜索
-
-Match 模式触发 MCTS 条件：
-
-```text
-Search Mode = Match
-Use MCTS Root = true
-not TeacherSafe
-node limit disabled
-max_depth >= 8
-arrows < 56
-remaining time >= MCTS Min Time
-```
-
-MCTS 设置：
-
-```text
-opening:
-    time share = max(option, 85%)
-    root initial width = 192
-    root max candidates = 512
-    rollout depth = 6
-    AB verify topN <= 4
-
-midgame:
-    time share = option default 75%
-    root initial width = 160
-    root max candidates = 448
-    rollout depth = 6
-
-late pre-partition:
-    time share <= 60%
-    root initial width = 96
-    root max candidates = 256
-    rollout depth = 4
-    AB verify topN >= 8
-
-UCT C = 0.45
-default MCTS Time Share = 75%
-default AB Verify TopN = 6
-```
-
-MCTS 最终优先选择 root child 访问数最多的走法，访问数接近时用 mean value + prior 破平。
-
-注意：`MCTS Time Share` 和 `AB Verify TopN` 是基础参数。Match 模式会根据箭数和剩余时间做自适应调整：开局更重广度，中后期更重 AB 校验。
-
-## MovePicker / history
-
-当前 MovePicker 使用固定数组，不在热路径分配 vector。
-
-排序信息：
-
-```text
-history_from_to
-history_to_arrow
-history_from_arrow
-butterfly_from_to
-butterfly_to_arrow
-butterfly_from_arrow
-category score
-```
-
-相对 history：
-
-```text
-relative = history + history * 1024 / (butterfly + 64)
-```
-
-这样可以奖励“搜索次数少但 cutoff 率高”的远距离封锁箭，避免它们被常见平庸走法淹没。
-
-## Soft Tail Search
-
-Match/TeacherSafe 不应该硬丢弃 tail moves。
-
-当前策略：
-
-```text
-top-K:
-    正常排序、正常深度搜索
-
-tail:
-    仍保留
-    强 LMR
-    zero-window
-    fail-high 后 full-depth re-search
-```
-
-FastSelfplay 可以继续使用 bounded movegen 和硬截断，因为目标是吞吐。
-
-## 当前验证基线
-
-最近一次验证：
-
-```text
-verify_refactor: accumulator, movegen, pseudo-legal, undo checks passed
-perft 1 = 2176
-perft 2 = 4307152
-go depth 3: returns legal bestmove
-go movetime 1000: MCTS returns legal bestmove
-```
-
-microbench 参考：
-
-```text
-movegen                 ~2.3 us/call
-movepicker              ~36 us/call
-evaluate fast           ~0.11 us/call
-strong eval cache hit   ~0.02 us/call
-strong eval cache miss  ~8.5 us/call
-NNUE forward            ~2 us/call
-```
-
-## 训练数据建议
-
-快速局面分布：
-
-```text
-setoption name Search Mode value FastSelfplay
-setoption name Use NNUE value false
-selfplay 20000000 4 1 15 1 1
-```
-
-强 teacher 标签：
-
-```text
-setoption name Search Mode value TeacherSafe
-setoption name Use NNUE value false
-selfplay 100000 4 30 8 8 1
-```
-
-实战风格数据：
-
-```text
-setoption name Search Mode value Match
-setoption name Use NNUE value false
-selfplay 100000 8 1000 1 64 1
-```
-
-训练 AMZNUE2 时，生成 teacher 数据通常应关闭 NNUE，避免旧网络或未收敛网络污染标签。
-
+﻿—#— —A—m—a—z—o—n—s—E—n—g—i—n—e——
+——
+—1—0—x—1—0— —浜—氶—┈—閫—婃——寮—曟—搸—銆—傚—綋—鍓—嶇—増—鏈——凡—缁—忎—笉—鏄——崟—绾—?—S—t—o—c—k—f—i—s—h—-—l—i—k—e— —A—l—p—h—a—B—e—t—a—锛—岃—€—屾—槸—锛—?—
+——
+—-— —P—E—X—T— —b—i—t—b—o—a—r—d— —璧—版—硶—鐢—熸—垚——
+—-— —c—a—c—h—e—-—l—i—n—e— —c—l—u—s—t—e—r— —T—T——
+—-— —鍒—嗗—眰— —C—l—a—s—s—i—c—a—l—2— —璇—勪—及——
+—-— —A—M—Z—N—U—E—2— —/— —N—N—U—E—-—v—2— —鎺—ュ—彛——
+—-— —M—a—t—c—h— —妯—″—紡— —r—o—o—t— —M—C—T—S—/—U—C—T— —+— —A—B— —v—e—r—i—f—y——
+—-— —F—a—s—t—S—e—l—f—p—l—a—y— —/— —T—e—a—c—h—e—r—S—a—f—e— —/— —M—a—t—c—h— —涓—夊——鎼—滅—储—妯—″—紡——
+——
+—#—#— —鏋—勫—缓——
+——
+—鎺—ㄨ—崘—浣—跨—敤— —C—M—a—k—e— —R—e—l—e—a—s—e—锛—?—
+——
+—`—`—`—p—o—w—e—r—s—h—e—l—l——
+—c—m—a—k—e— —-—S— —.— —-—B— —b—u—i—l—d— —-—D—C—M—A—K—E—_—B—U—I—L—D—_—T—Y—P—E—=—R—e—l—e—a—s—e——
+—c—m—a—k—e— —-—-—b—u—i—l—d— —b—u—i—l—d— —-—-—c—o—n—f—i—g— —R—e—l—e—a—s—e— —-—j——
+—`—`—`——
+——
+—R—e—l—e—a—s—e— —浼—氬—惎—鐢——細——
+——
+—-— —M—S—V—C—:— —`—/—O—2— —/—D—N—D—E—B—U—G— —/—G—L— —/—a—r—c—h—:—A—V—X—2—`——
+—-— —G—C—C—/—C—l—a—n—g—:— —`—-—O—3— —-—D—N—D—E—B—U—G— —-—m—a—r—c—h—=—n—a—t—i—v—e— —-—f—l—t—o— —-—f—u—n—r—o—l—l—-—l—o—o—p—s—`——
+——
+—#—#— —甯—哥—敤—鍛—戒—护——
+——
+—|— —鍛—戒—护— —|— —璇—存—槑— —|——
+—|—-—-—-—|—-—-—-—|——
+—|— —`—u—c—i—`— —|— —杈—撳—嚭— —U—C—I— —閫—夐—」— —|——
+—|— —`—i—s—r—e—a—d—y—`— —|— —鍚—屾—— —|——
+—|— —`—u—c—i—n—e—w—g—a—m—e—`— —|— —娓—?—T—T— —/— —e—v—a—l— —c—a—c—h—e— —/— —h—i—s—t—o—r—y— —|——
+—|— —`—d—`— —|— —鎵—撳—嵃—褰—撳—墠—妫—嬬—洏— —|——
+—|— —`—e—v—a—l—`— —|— —鎵—撳—嵃—褰—撳—墠—璇—勪—及—鎷—嗚—В— —|——
+—|— —`—p—e—r—f—t— —<—N—>—`— —|— —瀹—屾—暣—璧—版—硶—鐢—熸—垚—鑺—傜—偣—鏁—?—|——
+—|— —`—g—o— —d—e—p—t—h— —<—N—>—`— —|— —A—l—p—h—a—B—e—t—a— —娣—卞—害—鎼—滅—储— —|——
+—|— —`—g—o— —m—o—v—e—t—i—m—e— —<—m—s—>—`— —|— —鏃—堕—棿—鎼—滅—储—锛—汳—a—t—c—h— —妯—″—紡—寮—€—涓——眬—浼—氫—紭—鍏—堣—蛋— —M—C—T—S— —r—o—o—t— —|——
+—|— —`—s—e—l—f—p—l—a—y— —<—g—a—m—e—s—>— —<—d—e—p—t—h—>— —<—m—s—>— —<—g—a—m—e—T—h—r—e—a—d—s—>— —<—h—a—s—h—M—B—>— —<—s—e—a—r—c—h—T—h—r—e—a—d—s—>— —[—n—o—d—e—s—]—`— —|— —鐢—熸—垚—鑷——崥—鏁—版—嵁— —|——
+——
+—#—#— —鎼—滅—储—妯—″—紡——
+——
+—#—#—#— —F—a—s—t—S—e—l—f—p—l—a—y——
+——
+—閫—熷—害—浼—樺—厛—锛—岀—敤—浜—庡—揩—閫—熺—敓—鎴—愬—眬—闈—㈠—垎—甯—冦—€—?—
+——
+—鎺—ㄨ—崘—閰—嶇—疆—锛—?—
+——
+—`—`—`—t—e—x—t——
+—s—e—t—o—p—t—i—o—n— —n—a—m—e— —S—e—a—r—c—h— —M—o—d—e— —v—a—l—u—e— —F—a—s—t—S—e—l—f—p—l—a—y——
+—s—e—t—o—p—t—i—o—n— —n—a—m—e— —U—s—e— —N—N—U—E— —v—a—l—u—e— —f—a—l—s—e——
+—s—e—l—f—p—l—a—y— —2—0—0—0—0—0—0—0— —4— —1— —1—5— —1— —1——
+—`—`—`——
+——
+—璇—ユ—ā—寮—忎—細—鍚——敤—蹇——€—熻—瘎—浼—般—€—乥—o—u—n—d—e—d— —m—o—v—e—g—e—n—锛—屽—苟—鍏—抽—棴—寮—?—m—o—v—e— —c—a—t—e—g—o—r—i—e—s— —/— —M—C—T—S—銆—傚—畠—杩—芥—眰—鍚—炲—悙—锛—屼—笉—閫—傚—悎—褰—撳—己— —t—e—a—c—h—e—r—銆—?—
+——
+—#—#—#— —T—e—a—c—h—e—r—S—a—f—e——
+——
+—璁——粌—寮—烘—爣—绛—句—紭—鍏—堛—€—?—
+——
+—鎺—ㄨ—崘—閰—嶇—疆—锛—?—
+——
+—`—`—`—t—e—x—t——
+—s—e—t—o—p—t—i—o—n— —n—a—m—e— —S—e—a—r—c—h— —M—o—d—e— —v—a—l—u—e— —T—e—a—c—h—e—r—S—a—f—e——
+—s—e—t—o—p—t—i—o—n— —n—a—m—e— —U—s—e— —N—N—U—E— —v—a—l—u—e— —f—a—l—s—e——
+—s—e—l—f—p—l—a—y— —1—0—0—0—0—0— —4— —3—0— —8— —8— —1——
+—`—`—`——
+——
+—璇—ユ—ā—寮—忓—叧—闂——‖—鎴——柇—銆—丯—M—P—銆—丩—M—P—銆—丮—C—T—S—锛—屼—娇—鐢—ㄥ—己— —C—l—a—s—s—i—c—a—l—2—銆—傞—€—熷—害—鎱—㈡—槸—姝—ｅ—父—鐨—勩—€—?—
+——
+—#—#—#— —M—a—t—c—h——
+——
+—瀹—炴—垬—榛—樿——妯—″—紡—銆—?—
+——
+—`—`—`—t—e—x—t——
+—s—e—t—o—p—t—i—o—n— —n—a—m—e— —S—e—a—r—c—h— —M—o—d—e— —v—a—l—u—e— —M—a—t—c—h——
+—g—o— —m—o—v—e—t—i—m—e— —1—0—0—0——
+—`—`—`——
+——
+—寮—€—涓——眬—榛—樿——浣—跨—敤— —r—o—o—t—-—o—n—l—y— —M—C—T—S—/—U—C—T—锛—屽—悗—鏈—熸—垨—浣—庢—椂—闂—?—浣—庢—繁—搴—﹀—洖—閫—€—鍒—?—A—l—p—h—a—B—e—t—a—銆—侻—C—T—S— —鍚—庝—細—瀵—瑰—墠—鑻—ュ—共—鍊—欓—€—夊—仛—娴—呭—眰— —A—B— —v—e—r—i—f—y—銆—?—
+——
+—#—#— —褰—撳—墠—璇—勪—及—浣—撶—郴——
+——
+—褰—撳—墠—璇—勪—及—涓—嶆—槸—鍗—曚—竴—鍑—芥—暟—锛—岃—€—屾—槸—鍒—嗗—眰—璺——緞—锛—?—
+——
+—`—`—`—t—e—x—t——
+—e—v—a—l—u—a—t—e—(—)——
+— — —-—>— —e—v—a—l—u—a—t—e—_—w—i—t—h—_—t—i—e—r—(—)——
+— — — — — — — —-—>— —F—a—s—t— —l—e—g—a—c—y— —e—v—a—l——
+— — — — — — — —-—>— —M—i—x—e—d— —s—e—l—e—c—t—i—v—e— —e—v—a—l——
+— — — — — — — —-—>— —S—t—r—o—n—g— —C—l—a—s—s—i—c—a—l—2——
+— — — — — — — —-—>— —o—p—t—i—o—n—a—l— —A—M—Z—N—U—E—2— —r—e—s—i—d—u—a—l——
+——
+—M—C—T—S— —r—o—o—t— —/— —r—o—l—l—o—u—t——
+— — —-—>— —C—h—a—m—p—i—o—n—E—v—a—l—F—a—s—t——
+— — —-—>— —C—h—a—m—p—i—o—n— —m—o—v—e— —p—r—i—o—r——
+—`—`—`——
+——
+—#—#—#— —1—.— —F—a—s—t— —l—e—g—a—c—y— —e—v—a—l——
+——
+—鐢—ㄤ—簬— —F—a—s—t—S—e—l—f—p—l—a—y—銆—佹—祬—灞—傞—潪—鍏—抽—敭—鑺—傜—偣—銆—丯—N—U—E—/—S—t—r—o—n—g— —C—l—a—s—s—i—c—a—l— —閮—藉—叧—闂——椂—銆—?—
+——
+—缁—勬—垚—锛—?—
+——
+—`—`—`—t—e—x—t——
+—l—e—g—a—c—y— —=— —T—e—r—r—i—t—o—r—y—W—e—i—g—h—t— —*— —k—i—n—g—-—f—l—o—o—d— —t—e—r—r—i—t—o—r—y——
+— — — — — — — —+— —M—o—b—i—l—i—t—y—W—e—i—g—h—t— — —*— —q—u—e—e—n— —m—o—b—i—l—i—t—y——
+— — — — — — — —+— —l—e—g—a—c—y— —p—a—r—t—i—t—i—o—n— —b—o—n—u—s——
+—`—`—`——
+——
+—鐗—圭—偣—锛—?—
+——
+—-— —寰—堝—揩—锛—岄—伩—鍏—?—q—u—e—e—n—/—k—i—n—g— —d—i—s—t—a—n—c—e— —鍏—ㄩ—噺—璁—＄—畻—銆—?—
+—-— —閫—傚—悎—蹇——€—熻—嚜—鍗—氬—悶—鍚—愩—€—?—
+—-— —妫—嬪—姏—涓—嶅—— —S—t—r—o—n—g— —C—l—a—s—s—i—c—a—l—2—銆—?—
+——
+—#—#—#— —2—.— —S—t—r—o—n—g— —C—l—a—s—s—i—c—a—l—2——
+——
+—杩—欐—槸—褰—撳—墠—涓—昏——寮—鸿—瘎—浼—帮—紝—缁—撴—灉—涓—?—s—i—d—e—-—t—o—-—m—o—v—e— —P—O—V—銆—?—
+——
+—鍏—堣——绠—楀—弻—鏂—硅—窛—绂—诲—満—锛—?—
+——
+—-— —`—q—d—i—s—t—[—2—]—[—1—0—0—]—`—:— —q—u—e—e—n—-—d—i—s—t—a—n—c—e—锛—屽——婧—?—B—F—S—锛—屾—墿—灞—曚—娇—鐢—?—`—g—e—t—_—q—u—e—e—n—_—a—t—t—a—c—k—s—(—)—`—銆—?—
+—-— —`—k—d—i—s—t—[—2—]—[—1—0—0—]—`—:— —k—i—n—g—-—d—i—s—t—a—n—c—e—锛—宐—i—t—b—o—a—r—d— —w—a—v—e—f—r—o—n—t— —鎵—╁—睍—銆—?—
+——
+—鐒—跺—悗—寰—楀—埌—浠—ヤ—笅—鐧—芥—柟—瑙—嗚——瀛—愰—」—锛—?—
+——
+—|— —瀛—愰—」— —|— —鍚——箟— —|——
+—|—-—-—-—|—-—-—-—|——
+—|— —`—t—1—`— —|— —q—u—e—e—n—-—d—i—s—t—a—n—c—e— —t—e—r—r—i—t—o—r—y—锛—氱—┖—鏍—肩——鍝——柟— —q—u—e—e—n— —璺—濈——鏇—磋—繎— —|——
+—|— —`—t—2—`— —|— —k—i—n—g—-—d—i—s—t—a—n—c—e— —t—e—r—r—i—t—o—r—y—锛—氱—┖—鏍—肩——鍝——柟— —k—i—n—g— —璺—濈——鏇—磋—繎— —|——
+—|— —`—p—1—`— —|— —q—u—e—e—n—-—d—i—s—t—a—n—c—e— —c—l—o—s—e—n—e—s—s—锛—氳—秺—杩—戞—潈—閲—嶈—秺—楂—?—|——
+—|— —`—p—2—`— —|— —k—i—n—g—-—d—i—s—t—a—n—c—e— —c—l—o—s—e—n—e—s—s— —/— —r—e—a—c—h—a—b—i—l—i—t—y— —淇——— —|——
+—|— —`—m—`— —|— —p—e—r—-—a—m—a—z—o—n— —m—o—b—i—l—i—t—y—/—e—n—c—l—o—s—u—r—e—锛—氬—眬—閮—ㄦ—満—鍔—ㄦ—€—у—拰—琚——洶—鎯—╃—綒— —|——
+—|— —`—p—a—r—t—i—t—i—o—n—`— —|— —杩—為—€—氬—潡—/—鍒—嗗—尯—璇—勪—及— —|——
+—|— —`—m—o—b—i—l—i—t—y—`— —|— —P—E—X—T— —q—u—e—e—n— —m—o—b—i—l—i—t—y— —鎬—诲—樊— —|——
+——
+—闃—舵——鏉—冮—噸—鎸—夌——鏁—板—彉—鍖—栵—細——
+——
+—`—`—`—t—e—x—t——
+—p—h—a—s—e— —0—:— —a—r—r—o—w—s— —<—=— —1—4——
+—p—h—a—s—e— —1—:— —a—r—r—o—w—s— —<—=— —2—5——
+—p—h—a—s—e— —2—:— —a—r—r—o—w—s— —<—=— —4—0——
+—p—h—a—s—e— —3—:— —a—r—r—o—w—s— —<—=— —5—5——
+—p—h—a—s—e— —4—:— —a—r—r—o—w—s— —<—=— —6—3——
+—p—h—a—s—e— —5—:— —a—r—r—o—w—s— —>— — —6—3——
+—`—`—`——
+——
+—瓒—婂—埌—鍚—庢—湡—锛—宍—t—2—`—銆—乣—m—`—銆—乣—p—a—r—t—i—t—i—o—n—`— —鏉—冮—噸—瓒—婇—珮—锛—涘—紑—灞—€—鏇—村—亸— —`—t—1—`—銆—?—
+——
+—#—#—#— —3—.— —P—a—r—t—i—t—i—o—n— —f—a—s—t—-—t—r—a—c—k——
+——
+—褰—撶——鏁—拌—緝—澶—氭—椂—锛—屼—細—灏—濊—瘯—妫—€—鏌—ユ——鐩—樻—槸—鍚—﹀—凡—缁—忓—畬—鍏—ㄥ—垎—鍖—猴—細——
+——
+—`—`—`—t—e—x—t——
+—i—f— —n—o— —c—o—n—n—e—c—t—e—d— —c—o—m—p—o—n—e—n—t— —c—o—n—t—a—i—n—s— —b—o—t—h— —w—h—i—t—e— —a—n—d— —b—l—a—c—k— —a—m—a—z—o—n—s—:——
+— — — — —e—v—a—l— —=— —l—a—r—g—e— —s—i—d—e—-—r—e—l—a—t—i—v—e— —c—o—m—p—o—n—e—n—t—-—s—p—a—c—e— —s—c—o—r—e——
+—`—`—`——
+——
+—杩—欓—伩—鍏—嶅—悗—鏈—熷—湪—宸—茬—粡—鍒—嗗—紑—鐨—勫—眬—闈—㈤—噷—缁—х—画—鍋—氬—ぇ—閲—忔—棤—鎰—忎—箟—鎼—滅—储—銆—?—
+——
+—灏—忓—崟—杈—瑰—尯—鍩—熻—繕—浼—氬—皾—璇—?—e—x—a—c—t— —f—i—l—l— —s—o—l—v—e—r—锛—?—
+——
+—`—`—`—t—e—x—t——
+—i—f— —c—o—m—p—o—n—e—n—t— —c—o—n—t—a—i—n—s— —o—n—l—y— —o—n—e— —s—i—d—e——
+—a—n—d— —e—m—p—t—y—_—c—o—u—n—t— —<—=— —1—4—:——
+— — — — —e—x—a—c—t— —=— —l—o—c—a—l— —m—a—x—i—m—u—m—-—f—i—l—l— —s—e—a—r—c—h— —w—i—t—h— —m—e—m—o——
+—e—l—s—e—:——
+— — — — —f—a—l—l—b—a—c—k— —=— —s—i—m—p—l—e— —c—o—m—p—o—n—e—n—t— —e—s—t—i—m—a—t—e——
+—`—`—`——
+——
+—杩—欎—釜— —s—o—l—v—e—r— —鍙——湪—灏—?—c—o—m—p—o—n—e—n—t— —涓—婂—伐—浣—溿—€—傚—畠—浼—氭—妸—灞—€—閮—ㄥ—尯—鍩—熷—唴—鐨—?—a—m—a—z—o—n— —浣—嶇—疆—鍜—屽—崰—鐢—ㄤ—綅—浣—滀—负— —m—e—m—o— —k—e—y—锛—岀—簿—纭——悳—绱—⑩—€—滆—繖—涓—€—鍧—楀—尯—鍩—熸—渶—缁—堣—繕—鑳—借—蛋—鍑—犳——鈥—濄—€—傚——鏋—滃—眬—閮—ㄥ—垎—鏀——垎—鐐—歌—秴—杩—囬——绠—楋—紝—浼—氳—嚜—鍔—ㄥ—洖—閫—€—鍒—板—師—鏉—ョ—殑—浼—板—€—硷—紝—閬—垮—厤—鎷—栨—參—涓——洏—銆—?—
+——
+—#—#—#— —4—.— —E—v—a—l— —c—a—c—h—e——
+——
+—S—t—r—o—n—g— —C—l—a—s—s—i—c—a—l—2— —鐨—勮—窛—绂—诲—満—鍜—?—g—l—o—b—a—l— —f—e—a—t—u—r—e—s— —涓—嶅—湪— —`—d—o—_—m—o—v—e—(—)—`— —閲—岀—淮—鎶—わ—紝—鑰—屾—槸—鍦—?—e—v—a—l—u—a—t—e— —c—a—c—h—e— —m—i—s—s— —鏃—惰——绠—椼—€—?—
+——
+—褰—撳—墠— —c—a—c—h—e— —鏄——細——
+——
+—`—`—`—t—e—x—t——
+—t—h—r—e—a—d—_—l—o—c—a—l— —d—i—r—e—c—t—-—m—a—p—p—e—d— —e—v—a—l— —c—a—c—h—e——
+—s—i—z—e— —=— —1— —<—<— —1—5——
+—k—e—y— — —=— —p—o—s—i—t—i—o—n— —z—o—b—r—i—s—t——
+—d—a—t—a— —=— —E—v—a—l—I—n—f—o— —{— —b—r—e—a—k—d—o—w—n—,— —g—l—o—b—a—l—[—3—2—]—,— —p—h—a—s—e—_—b—u—c—k—e—t— —}——
+—`—`—`——
+——
+—濂—藉——锛—?—
+——
+—-— —澶—氱—嚎—绋—?—s—e—l—f—p—l—a—y— —涓—嶆—姠—鍚—屼—竴—涓——叏—灞—€— —e—v—a—l— —c—a—c—h—e—銆—?—
+—-— —鍏—抽—棴— —S—t—r—o—n—g— —C—l—a—s—s—i—c—a—l— —/— —N—N—U—E— —鏃—朵—笉—浼—氳——瑙—﹀—彂—閲—嶈—瘎—浼—般—€—?—
+——
+—#—#—#— —5—.— —A—M—Z—N—U—E—2— —/— —F—u—s—i—o—n— —N—N—U—E——
+——
+—褰—撳—墠—鏃—?—3—0—0—-—o—n—l—y— —N—N—U—E— —宸—插—簾—寮—冦—€—傚—姞—杞—藉—櫒—鍙——帴—鍙—?—A—M—Z—N—U—E—2— —鏍—煎—紡—銆—?—
+——
+—N—N—U—E— —a—c—t—i—v—e— —鏉—′—欢—锛—?—
+——
+—`—`—`—t—e—x—t——
+—U—s—e— —N—N—U—E— —=— —t—r—u—e——
+—a—n—d— —A—M—Z—N—U—E—2— —w—e—i—g—h—t—s— —l—o—a—d—e—d——
+—`—`—`——
+——
+—鎺—ㄧ—悊—璺——緞—锛—?—
+——
+—`—`—`—t—e—x—t——
+—c—l—a—s—s—i—c—a—l— —=— —C—l—a—s—s—i—c—a—l—2— —o—r— —l—e—g—a—c—y——
+—n—n—u—e—_—e—v—a—l— —=— —A—M—Z—N—U—E—2—(—b—a—s—e—_—a—c—c—,— —l—i—n—e—_—a—c—c—,— —g—l—o—b—a—l—[—3—2—]—,— —p—h—a—s—e—_—b—u—c—k—e—t—)——
+——
+—i—f— —U—s—e— —P—u—r—e— —N—N—U—E—:——
+— — — — —r—e—t—u—r—n— —n—n—u—e—_—e—v—a—l——
+—e—l—s—e— —i—f— —U—s—e— —R—e—s—i—d—u—a—l— —N—N—U—E—:——
+— — — — —r—e—t—u—r—n— —c—l—a—s—s—i—c—a—l— —+— —n—n—u—e—_—e—v—a—l——
+—e—l—s—e—:——
+— — — — —r—e—t—u—r—n— —c—l—a—s—s—i—c—a—l——
+—`—`—`——
+——
+—澧—為—噺— —a—c—c—u—m—u—l—a—t—o—r—锛—?—
+——
+—`—`—`—t—e—x—t——
+—b—a—s—e—[—2—]—[—5—1—2—]——
+—l—i—n—e—[—2—]—[—6—4—]——
+—l—i—n—e—_—c—o—d—e—[—2—]—[—5—8—]——
+—`—`—`——
+——
+—`—d—o—_—m—o—v—e—(—)—`— —鍙——湪— —N—N—U—E— —a—c—t—i—v—e— —鏃—跺——鍒—?—鏇—存—柊— —a—c—c—u—m—u—l—a—t—o—r—锛—岄—伩—鍏—?—`—U—s—e— —N—N—U—E—=—f—a—l—s—e—`— —鐨—?—s—e—l—f—p—l—a—y— —琚——嫋—鎱——€—?—
+——
+—#—#—#— —6—.— —C—h—a—m—p—i—o—n—E—v—a—l—F—a—s—t——
+——
+—杩—欐—槸—缁—?—M—C—T—S— —r—o—o—t— —/— —r—o—l—l—o—u—t— —/— —p—r—i—o—r— —鐢—ㄧ—殑—杞—婚—噺—鍐—犲—啗—寮—忚—瘎—浼—帮—紝—涓—嶇—洿—鎺—ユ—浛—浠—?—C—l—a—s—s—i—c—a—l—2—銆—?—
+——
+—缁—勬—垚—锛—?—
+——
+—`—`—`—t—e—x—t——
+—C—h—a—m—p—i—o—n—E—v—a—l—F—a—s—t— —=——
+— — — — —p—h—a—s—e—_—w—e—i—g—h—t—e—d— —T—1— —q—u—e—e—n— —t—e—r—r—i—t—o—r—y——
+— — —+— —p—h—a—s—e—_—w—e—i—g—h—t—e—d— —T—2— —k—i—n—g— —t—e—r—r—i—t—o—r—y——
+— — —+— —l—o—c—a—l— —m—o—b—i—l—i—t—y— —/— —e—n—c—l—o—s—u—r—e——
+—`—`—`——
+——
+—瀹—冪—殑—鐩——爣—涓—嶆—槸—姣—?—C—l—a—s—s—i—c—a—l—2— —鏇—村—噯—锛—岃—€—屾—槸—锛—?—
+——
+—-— —缁—?—M—C—T—S— —r—o—l—l—o—u—t— —l—e—a—f— —涓—€—涓——ǔ—瀹—氥—€—佷—究—瀹—滅—殑—灞—€—闈—㈠—€—笺—€—?—
+—-— —缁—?—r—o—o—t— —c—a—n—d—i—d—a—t—e— —涓—€—涓——€—滅—┖—闂—村—垏—鍓—?—灏—侀—攣—鈥—濋——鏍—?—p—r—i—o—r—銆—?—
+—-— —閬—垮—厤— —M—C—T—S— —鍙—樻—垚—绾——殢—鏈—?—p—l—a—y—o—u—t—銆—?—
+——
+—M—o—v—e— —p—r—i—o—r— —浼—氳—€—冭—檻—锛—?—
+——
+—-— —绉—诲—姩—鍚—庤—嚜—韬—?—m—o—b—i—l—i—t—y— —鏄——惁—鎻—愬—崌—銆—?—
+—-— —绠——槸—鍚—﹂—偦—杩—戞—晫—鏂—?—a—m—a—z—o—n—銆—?—
+—-— —绠——槸—鍚—﹀—噺—灏—戞—晫—鏂—?—q—u—e—e—n— —m—o—b—i—l—i—t—y—銆—?—
+—-— —绠——槸—鍚—︽—墦—鍦—ㄤ—綆—閭—诲—眳—鏁—?—c—h—o—k—e—p—o—i—n—t—銆—?—
+—-— —鏄——惁—鑷——洶—銆—?—
+——
+—#—#— —e—v—a—l—u—a—t—e—_—s—e—a—r—c—h— —鐨—勯—€—夋—嫨—閫—昏—緫——
+——
+—鎼—滅—储—涓——笉—鏄——瘡—涓——妭—鐐—归—兘—寮—鸿—瘎—浼—帮—細——
+——
+—`—`—`—t—e—x—t——
+—i—f— —S—t—r—o—n—g— —C—l—a—s—s—i—c—a—l— —d—i—s—a—b—l—e—d— —a—n—d— —N—N—U—E— —i—n—a—c—t—i—v—e—:——
+— — — — —f—a—s—t— —l—e—g—a—c—y— —e—v—a—l——
+——
+—i—f— —E—v—a—l— —T—i—e—r— —=— —S—t—r—o—n—g— —o—r— —N—N—U—E— —a—c—t—i—v—e—:——
+— — — — —S—t—r—o—n—g— —C—l—a—s—s—i—c—a—l—2— —/— —F—u—s—i—o—n——
+——
+—i—f— —E—v—a—l— —T—i—e—r— —=— —F—a—s—t—:——
+— — — — —f—a—s—t— —l—e—g—a—c—y— —e—v—a—l——
+——
+—i—f— —E—v—a—l— —T—i—e—r— —=— —M—i—x—e—d—:——
+— — — — —r—o—o—t— —/— —P—V— —/— —d—e—p—t—h— —>—=— —3— —/— —a—r—r—o—w—s— —>—=— —5—6— —-—>— —S—t—r—o—n—g——
+— — — — —o—t—h—e—r—w—i—s—e— —f—i—r—s—t— —u—s—e— —F—a—s—t——
+— — — — —i—f— —F—a—s—t— —s—c—o—r—e— —n—e—a—r— —a—l—p—h—a—/—b—e—t—a— —w—i—n—d—o—w— —-—>— —S—t—r—o—n—g— —r—e—-—e—v—a—l——
+—`—`—`——
+——
+—杩—欎—釜—璁—捐——鏄——负—浜—嗛—伩—鍏—嶆—瘡—涓——彾—瀛—愰—兘—绠—?—q—u—e—e—n—/—k—i—n—g— —d—i—s—t—a—n—c—e—锛—屽—悓—鏃—朵—繚—鐣—欏—叧—閿——妭—鐐—圭—殑—璇—勪—及—璐—ㄩ—噺—銆—?—
+——
+—#—#— —M—C—T—S—/—A—B— —娣—峰—悎—鎼—滅—储——
+——
+—M—a—t—c—h— —妯—″—紡—瑙—﹀—彂— —M—C—T—S— —鏉—′—欢—锛—?—
+——
+—`—`—`—t—e—x—t——
+—S—e—a—r—c—h— —M—o—d—e— —=— —M—a—t—c—h——
+—U—s—e— —M—C—T—S— —R—o—o—t— —=— —t—r—u—e——
+—n—o—t— —T—e—a—c—h—e—r—S—a—f—e——
+—n—o—d—e— —l—i—m—i—t— —d—i—s—a—b—l—e—d——
+—m—a—x—_—d—e—p—t—h— —>—=— —8——
+—a—r—r—o—w—s— —<— —5—6——
+—r—e—m—a—i—n—i—n—g— —t—i—m—e— —>—=— —M—C—T—S— —M—i—n— —T—i—m—e——
+—`—`—`——
+——
+—M—C—T—S— —璁—剧—疆—锛—?—
+——
+—`—`—`—t—e—x—t——
+—o—p—e—n—i—n—g—:——
+— — — — —t—i—m—e— —s—h—a—r—e— —=— —m—a—x—(—o—p—t—i—o—n—,— —8—5—%—)——
+— — — — —r—o—o—t— —i—n—i—t—i—a—l— —w—i—d—t—h— —=— —1—9—2——
+— — — — —r—o—o—t— —m—a—x— —c—a—n—d—i—d—a—t—e—s— —=— —5—1—2——
+— — — — —r—o—l—l—o—u—t— —d—e—p—t—h— —=— —6——
+— — — — —A—B— —v—e—r—i—f—y— —t—o—p—N— —<—=— —4——
+——
+—m—i—d—g—a—m—e—:——
+— — — — —t—i—m—e— —s—h—a—r—e— —=— —o—p—t—i—o—n— —d—e—f—a—u—l—t— —7—5—%——
+— — — — —r—o—o—t— —i—n—i—t—i—a—l— —w—i—d—t—h— —=— —1—6—0——
+— — — — —r—o—o—t— —m—a—x— —c—a—n—d—i—d—a—t—e—s— —=— —4—4—8——
+— — — — —r—o—l—l—o—u—t— —d—e—p—t—h— —=— —6——
+——
+—l—a—t—e— —p—r—e—-—p—a—r—t—i—t—i—o—n—:——
+— — — — —t—i—m—e— —s—h—a—r—e— —<—=— —6—0—%——
+— — — — —r—o—o—t— —i—n—i—t—i—a—l— —w—i—d—t—h— —=— —9—6——
+— — — — —r—o—o—t— —m—a—x— —c—a—n—d—i—d—a—t—e—s— —=— —2—5—6——
+— — — — —r—o—l—l—o—u—t— —d—e—p—t—h— —=— —4——
+— — — — —A—B— —v—e—r—i—f—y— —t—o—p—N— —>—=— —8——
+——
+—U—C—T— —C— —=— —0—.—4—5——
+—d—e—f—a—u—l—t— —M—C—T—S— —T—i—m—e— —S—h—a—r—e— —=— —7—5—%——
+—d—e—f—a—u—l—t— —A—B— —V—e—r—i—f—y— —T—o—p—N— —=— —6——
+—`—`—`——
+——
+—M—C—T—S— —鏈—€—缁—堜—紭—鍏—堥—€—夋—嫨— —r—o—o—t— —c—h—i—l—d— —璁—块—棶—鏁—版—渶—澶—氱—殑—璧—版—硶—锛—岃——闂——暟—鎺—ヨ—繎—鏃—剁—敤— —m—e—a—n— —v—a—l—u—e— —+— —p—r—i—o—r— —鐮—村—钩—銆—?—
+——
+—娉—ㄦ—剰—锛—歚—M—C—T—S— —T—i—m—e— —S—h—a—r—e—`— —鍜—?—`—A—B— —V—e—r—i—f—y— —T—o—p—N—`— —鏄——熀—纭—€—鍙—傛—暟—銆—侻—a—t—c—h— —妯—″—紡—浼—氭—牴—鎹———鏁—板—拰—鍓—╀—綑—鏃—堕—棿—鍋—氳—嚜—閫—傚—簲—璋—冩—暣—锛—氬—紑—灞—€—鏇—撮—噸—骞—垮—害—锛—屼—腑—鍚—庢—湡—鏇—撮—噸— —A—B— —鏍—￠—獙—銆—?—
+——
+—#—#— —M—o—v—e—P—i—c—k—e—r— —/— —h—i—s—t—o—r—y——
+——
+—褰—撳—墠— —M—o—v—e—P—i—c—k—e—r— —浣—跨—敤—鍥—哄—畾—鏁—扮—粍—锛—屼—笉—鍦—ㄧ—儹—璺——緞—鍒—嗛—厤— —v—e—c—t—o—r—銆—?—
+——
+—鎺—掑—簭—淇—℃—伅—锛—?—
+——
+—`—`—`—t—e—x—t——
+—h—i—s—t—o—r—y—_—f—r—o—m—_—t—o——
+—h—i—s—t—o—r—y—_—t—o—_—a—r—r—o—w——
+—h—i—s—t—o—r—y—_—f—r—o—m—_—a—r—r—o—w——
+—b—u—t—t—e—r—f—l—y—_—f—r—o—m—_—t—o——
+—b—u—t—t—e—r—f—l—y—_—t—o—_—a—r—r—o—w——
+—b—u—t—t—e—r—f—l—y—_—f—r—o—m—_—a—r—r—o—w——
+—c—a—t—e—g—o—r—y— —s—c—o—r—e——
+—`—`—`——
+——
+—鐩—稿—— —h—i—s—t—o—r—y—锛—?—
+——
+—`—`—`—t—e—x—t——
+—r—e—l—a—t—i—v—e— —=— —h—i—s—t—o—r—y— —+— —h—i—s—t—o—r—y— —*— —1—0—2—4— —/— —(—b—u—t—t—e—r—f—l—y— —+— —6—4—)——
+—`—`—`——
+——
+—杩—欐—牱—鍙——互—濂—栧—姳—鈥—滄—悳—绱—㈡——鏁—板—皯—浣—?—c—u—t—o—f—f— —鐜—囬—珮—鈥—濈—殑—杩—滆—窛—绂—诲—皝—閿—佺——锛—岄—伩—鍏—嶅—畠—浠———甯—歌——骞—冲—焊—璧—版—硶—娣—规—病—銆—?—
+——
+—#—#— —S—o—f—t— —T—a—i—l— —S—e—a—r—c—h——
+——
+—M—a—t—c—h—/—T—e—a—c—h—e—r—S—a—f—e— —涓—嶅—簲—璇—ョ—‖—涓—㈠—純— —t—a—i—l— —m—o—v—e—s—銆—?—
+——
+—褰—撳—墠—绛—栫—暐—锛—?—
+——
+—`—`—`—t—e—x—t——
+—t—o—p—-—K—:——
+— — — — —姝—ｅ—父—鎺—掑—簭—銆—佹——甯—告—繁—搴—︽—悳—绱—?—
+——
+—t—a—i—l—:——
+— — — — —浠—嶄—繚—鐣—?—
+— — — — —寮—?—L—M—R——
+— — — — —z—e—r—o—-—w—i—n—d—o—w——
+— — — — —f—a—i—l—-—h—i—g—h— —鍚—?—f—u—l—l—-—d—e—p—t—h— —r—e—-—s—e—a—r—c—h——
+—`—`—`——
+——
+—F—a—s—t—S—e—l—f—p—l—a—y— —鍙——互—缁—х—画—浣—跨—敤— —b—o—u—n—d—e—d— —m—o—v—e—g—e—n— —鍜—岀—‖—鎴——柇—锛—屽—洜—涓—虹—洰—鏍—囨—槸—鍚—炲—悙—銆—?—
+——
+—#—#— —褰—撳—墠—楠—岃—瘉—鍩—虹—嚎——
+——
+—鏈—€—杩—戜—竴—娆—￠—獙—璇—侊—細——
+——
+—`—`—`—t—e—x—t——
+—v—e—r—i—f—y—_—r—e—f—a—c—t—o—r—:— —a—c—c—u—m—u—l—a—t—o—r—,— —m—o—v—e—g—e—n—,— —p—s—e—u—d—o—-—l—e—g—a—l—,— —u—n—d—o— —c—h—e—c—k—s— —p—a—s—s—e—d——
+—p—e—r—f—t— —1— —=— —2—1—7—6——
+—p—e—r—f—t— —2— —=— —4—3—0—7—1—5—2——
+—g—o— —d—e—p—t—h— —3—:— —r—e—t—u—r—n—s— —l—e—g—a—l— —b—e—s—t—m—o—v—e——
+—g—o— —m—o—v—e—t—i—m—e— —1—0—0—0—:— —M—C—T—S— —r—e—t—u—r—n—s— —l—e—g—a—l— —b—e—s—t—m—o—v—e——
+—`—`—`——
+——
+—m—i—c—r—o—b—e—n—c—h— —鍙—傝—€—冿—細——
+——
+—`—`—`—t—e—x—t——
+—m—o—v—e—g—e—n— — — — — — — — — — — — — — — — — —~—2—.—3— —u—s—/—c—a—l—l——
+—m—o—v—e—p—i—c—k—e—r— — — — — — — — — — — — — — —~—3—6— —u—s—/—c—a—l—l——
+—e—v—a—l—u—a—t—e— —f—a—s—t— — — — — — — — — — — —~—0—.—1—1— —u—s—/—c—a—l—l——
+—s—t—r—o—n—g— —e—v—a—l— —c—a—c—h—e— —h—i—t— — — —~—0—.—0—2— —u—s—/—c—a—l—l——
+—s—t—r—o—n—g— —e—v—a—l— —c—a—c—h—e— —m—i—s—s— — —~—8—.—5— —u—s—/—c—a—l—l——
+—N—N—U—E— —f—o—r—w—a—r—d— — — — — — — — — — — — —~—2— —u—s—/—c—a—l—l——
+—`—`—`——
+——
+—#—#— —璁——粌—鏁—版—嵁—寤—鸿———
+——
+—蹇——€—熷—眬—闈—㈠—垎—甯—冿—細——
+——
+—`—`—`—t—e—x—t——
+—s—e—t—o—p—t—i—o—n— —n—a—m—e— —S—e—a—r—c—h— —M—o—d—e— —v—a—l—u—e— —F—a—s—t—S—e—l—f—p—l—a—y——
+—s—e—t—o—p—t—i—o—n— —n—a—m—e— —U—s—e— —N—N—U—E— —v—a—l—u—e— —f—a—l—s—e——
+—s—e—l—f—p—l—a—y— —2—0—0—0—0—0—0—0— —4— —1— —1—5— —1— —1——
+—`—`—`——
+——
+—寮—?—t—e—a—c—h—e—r— —鏍—囩——锛—?—
+——
+—`—`—`—t—e—x—t——
+—s—e—t—o—p—t—i—o—n— —n—a—m—e— —S—e—a—r—c—h— —M—o—d—e— —v—a—l—u—e— —T—e—a—c—h—e—r—S—a—f—e——
+—s—e—t—o—p—t—i—o—n— —n—a—m—e— —U—s—e— —N—N—U—E— —v—a—l—u—e— —f—a—l—s—e——
+—s—e—l—f—p—l—a—y— —1—0—0—0—0—0— —4— —3—0— —8— —8— —1——
+—`—`—`——
+——
+—瀹—炴—垬—椋—庢—牸—鏁—版—嵁—锛—?—
+——
+—`—`—`—t—e—x—t——
+—s—e—t—o—p—t—i—o—n— —n—a—m—e— —S—e—a—r—c—h— —M—o—d—e— —v—a—l—u—e— —M—a—t—c—h——
+—s—e—t—o—p—t—i—o—n— —n—a—m—e— —U—s—e— —N—N—U—E— —v—a—l—u—e— —f—a—l—s—e——
+—s—e—l—f—p—l—a—y— —1—0—0—0—0—0— —8— —1—0—0—0— —1— —6—4— —1——
+—`—`—`——
+——
+—璁——粌— —A—M—Z—N—U—E—2— —鏃—讹—紝—鐢—熸—垚— —t—e—a—c—h—e—r— —鏁—版—嵁—閫—氬—父—搴—斿—叧—闂—?—N—N—U—E—锛—岄—伩—鍏—嶆—棫—缃—戠—粶—鎴—栨—湭—鏀—舵—暃—缃—戠—粶—姹—℃—煋—鏍—囩——銆—?—
+——
+—
+—#—#— —閰—嶇—疆—涓—庢——鍔—涙—彁—鍗—囧—缓—璁—?—
+—涓—轰—簡—鑾—峰—緱—鏈—€—寮—虹—殑—瀵—瑰—紙—琛—ㄧ—幇—锛—屽—缓—璁——牴—鎹——‖—浠—跺—拰—闇—€—姹—傝—皟—鏁—翠—互—涓—嬮—厤—缃——細—
+—
+—#—#—#— —1—.— —鏍—稿—績—鎼—滅—储—妯—″—紡— —(—S—e—a—r—c—h— —M—o—d—e—)—
+—-— —*—*—M—a—t—c—h— —(—鎺—ㄨ—崘—)—*—*—锛—氳—繖—鏄——渶—寮—虹—殑—瀵—瑰—紙—妯—″—紡—銆—傚—畠—缁—撳—悎—浜—?—M—C—T—S— —鐨—勫—叏—灞—€—瑙—嗛—噹—鍜—?—A—l—p—h—a—-—B—e—t—a— —鐨—勬—垬—鏈——簿—纭——害—銆—傚—缓—璁——湪—姝—ｅ—紡—姣—旇—禌—涓——娇—鐢—ㄣ—€—?—-— —*—*—F—a—s—t—S—e—l—f—p—l—a—y—*—*—锛—氫—笓—涓—哄—揩—閫—熺—敓—鎴—愯——缁—冩—暟—鎹———璁—★—紝—鐗—虹—壊—浜—嗕—竴—閮—ㄥ—垎—娣—卞—害—浠—ユ—崲—鍙—栨—瀬—楂—樼—殑—鍚—炲—悙—閲—忋—€—?—-— —*—*—T—e—a—c—h—e—r—S—a—f—e—*—*—锛—氱—敤—浜—庣—敓—鎴—愭—洿—楂—樿—川—閲—忕—殑—璁——粌—鏍—囩——銆—?—
+—#—#—#— —2—.— —M—C—T—S— —鍏—抽—敭—鍙—傛—暟—
+—-— —*—*—U—s—e— —M—C—T—S— —R—o—o—t— —(—寮—€—鍚—?—*—*—锛—氬—湪—浜—氶—┈—閫—婃——杩—欑——楂—樺—垎—鏀——€—侀—噸—绌—洪—棿—鐨—勫—崥—寮—堜—腑—锛—孧—C—T—S— —鑳—藉——鏇—村—ソ—鍦—拌—瘑—鍒——€—滈——鍦—熷—皝—閿—佲—€—濊—秼—鍔—裤—€—傝—繖—鏄——紩—鎿—庤—兘—澶—熻—耽—涓—嬭——澶—氬——鏉—傛—畫—灞—€—鐨—勫—叧—閿——厤—缃——€—?—-— —*—*—M—C—T—S— —T—i—m—e— —S—h—a—r—e— —(—榛—樿—— —7—5—%—)—*—*—锛—氭—帶—鍒—?—M—C—T—S— —鍒—嗛—厤—鐨—勬—椂—闂—存—瘮—渚—嬨—€—傚——鍔—犳——鍊—煎—彲—鎻—愬—崌—鎴—樼—暐—鐪—煎—厜—锛—屾—洿—鏃—╁—湴—鍙—戠—幇—鑾—疯—儨—璺——緞—銆—?—
+—#—#—#— —3—.— —璇—勪—及—绯—荤—粺— —(—E—v—a—l—u—a—t—i—o—n—)—
+—-— —*—*—U—s—e— —N—N—U—E— —(—鎺—ㄨ—崘—寮—€—鍚—?—*—*—锛—氬—惎—鐢—?—A—M—Z—N—U—E—2— —绁—炵—粡—缃—戠—粶—銆—傝—繖—鏄——彁—鍗—囨——鍔—涚—殑—鍗—曟——鏈—€—澶—у——鐩—婇—」—銆—傚—紑—鍚——悗—锛—屽—紩—鎿—庡—皢—浠—庡—崟—绾——殑—鍑—犱—綍—璇—勪—及—杩—涘—寲—鍒—板——缁—嗗—井—鏍—煎—眬—鐨—勬—繁—搴—︾—悊—瑙—ｃ—€—?—-— —*—*—E—v—a—l— —T—i—e—r— —(—鎺—ㄨ—崘— —M—i—x—e—d—/—S—t—r—o—n—g—)—*—*—锛—氬—湪—娣—峰—悎—妯—″—紡—涓—嬶—紝—鍏—抽—敭—鑺—傜—偣—浣—跨—敤—寮—鸿—瘎—浼—帮—紝—鏅——€—氳—妭—鐐—逛—娇—鐢—ㄥ—揩—閫—熻—瘎—浼—帮—紝—鍦—ㄩ—€—熷—害—鍜—岀—簿—搴—﹂—棿—杈—惧—埌—鏈—€—浣—冲—钩—琛—°—€—?—
+—#—#—#— —4—.— —纭——欢—璧—勬—簮—鍒—╃—敤—
+—-— —*—*—T—h—r—e—a—d—s—*—*—锛—氬—缓—璁———缃——负— —C—P—U— —鐨—勯—€—昏—緫—鏍—稿—績—鏁—般—€—傛—湰—寮—曟—搸—鏀——寔—澶—氱—嚎—绋—嬪—苟—琛—?—M—C—T—S— —鍜—屽—叡—浜—?—T—T— —琛——紝—鏍—稿—績—鏁—拌—秺—澶—氾—紝—姣—忕——鎼—滅—储—鐨—勮—妭—鐐—规—暟— —(—n—p—s—)— —瓒—婇—珮—锛—屾——鍔—涜—秺—寮—恒—€—?—-— —*—*—H—a—s—h—*—*—锛—氬—缓—璁———缃——负— —1—0—2—4—M—B— —鎴—栨—洿—楂—樸—€—傛—洿—澶—х—殑—鍝—堝—笇—琛—ㄨ—兘—鏄—捐—憲—鎻—愬—崌—涓——悗—鏈—熸—悳—绱—㈢—殑—绋—冲—畾—鎬—э—紝—鍑—忓—皯—閲—嶅——璁—＄—畻—銆—?—
+—#—#—#— —5—.— —甯—歌——鑷—磋—儨—缁—勫—悎—
+—-— —*—*—鏈—€—寮—哄——寮—堥—厤—缃—?—*—锛—歚—S—e—a—r—c—h— —M—o—d—e— —=— —M—a—t—c—h—`— —+— —`—U—s—e— —M—C—T—S— —R—o—o—t— —=— —t—r—u—e—`— —+— —`—U—s—e— —N—N—U—E— —=— —t—r—u—e—`— —+— —`—T—h—r—e—a—d—s— —=— —[—C—P—U— —鏈—€—澶—ф—牳—蹇—冩—暟—]—`— —+— —`—H—a—s—h— —=— —1—0—2—4—M—B—+—`—銆—?—
+—

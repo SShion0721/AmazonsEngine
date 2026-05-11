@@ -1,5 +1,5 @@
 ﻿/*==================================================================
- * AMAZONS ENGINE 鈥?position.h
+ * AMAZONS ENGINE — position.h
  * Board state, Zobrist hashing, do_move / undo_move.
  * Mirrors Stockfish's position.h / position.cpp
  *==================================================================*/
@@ -11,7 +11,7 @@
 #include <array>
 #include <cstring>
 
-// 鈹€鈹€ Zobrist hash tables 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ── Zobrist hash tables ───────────────────────────────────────────
 // Mirrors Stockfish's Zobrist namespace.
 // One 64-bit random number per (piece_type, square) combination.
 namespace Zobrist {
@@ -22,14 +22,14 @@ namespace Zobrist {
     void init();             // call once at startup
 }
 
-// 鈹€鈹€ UndoInfo 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ── UndoInfo ─────────────────────────────────────────────────────
 // Stores everything needed to undo a move (like SF's StateInfo).
 struct UndoInfo {
     uint64_t key;   // Zobrist key before the move
     NNUE::Accumulator accumulator; // NNUE layer 0 state
 };
 
-// 鈹€鈹€ Position 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ── Position ─────────────────────────────────────────────────────
 // The complete board state. Mirrors Stockfish's Position class.
 struct Position {
     // Board: 100 cells, each is EMPTY / WHITE_AMAZON / BLACK_AMAZON / ARROW
@@ -43,7 +43,7 @@ struct Position {
     uint64_t key;       // running Zobrist hash
     int      ply;       // half-moves played from root
 
-    // 鈹€鈹€ Bitboards (maintained alongside board[] for fast bulk ops) 鈹€
+    // ── Bitboards (maintained alongside board[] for fast bulk ops) ─
     Bitboard128 bb_white;    // white amazon positions
     Bitboard128 bb_black;    // black amazon positions
     Bitboard128 bb_arrow;    // arrow positions
@@ -54,12 +54,12 @@ struct Position {
     static constexpr int MAX_PLY = 256;
     UndoInfo history[MAX_PLY];
 
-    // 鈹€鈹€ Setup 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── Setup ────────────────────────────────────────────────────
     void set_startpos();
     void set_from_fen(const std::string& fen); // optional extension
     void compute_accumulator();              // recompute NNUE acc from scratch
 
-    // 鈹€鈹€ Queries 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── Queries ──────────────────────────────────────────────────
     bool is_occupied(Square sq) const { return board[sq] != EMPTY; }
     bool is_empty   (Square sq) const { return board[sq] == EMPTY;  }
     
@@ -72,15 +72,15 @@ struct Position {
         return (get_queen_attacks(sq, bb_occupied) & ~bb_occupied).popcount();
     }
 
-    // 鈹€鈹€ Move execution 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── Move execution ───────────────────────────────────────────
     void do_move  (Move m);
     void undo_move(Move m);
 
-    // 鈹€鈹€ Null move (for NMP: just flip side, no piece movement) 鈹€鈹€鈹€
+    // ── Null move (for NMP: just flip side, no piece movement) ───
     void do_null_move();
     void undo_null_move();
 
-    // 鈹€鈹€ Debug 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── Debug ────────────────────────────────────────────────────
     void print() const;
 
 private:
@@ -92,4 +92,3 @@ private:
         return -1; // should not happen
     }
 };
-

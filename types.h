@@ -1,5 +1,5 @@
-/*==================================================================
- * AMAZONS ENGINE �?types.h
+﻿/*==================================================================
+ * AMAZONS ENGINE — types.h
  * Core types, constants, and board coordinate utilities.
  * Mirrors Stockfish's types.h
  *==================================================================*/
@@ -49,10 +49,10 @@ constexpr Move MOVE_NONE = 0;
 // ── Board coordinate helpers ─────────────────────────────────────
 /*  Square layout (row-major, bottom-left = 0):
  *
- *   90 91 92 93 94 95 96 97 98 99   �?rank 10 (top)
+ *   90 91 92 93 94 95 96 97 98 99   — rank 10 (top)
  *   80 81 82 83 84 85 86 87 88 89
  *   ...
- *    0  1  2  3  4  5  6  7  8  9   �?rank 1 (bottom)
+ *    0  1  2  3  4  5  6  7  8  9   — rank 1 (bottom)
  *    a  b  c  d  e  f  g  h  i  j
  */
 inline int    sq_row   (Square sq)        { return sq / 10; }
@@ -61,12 +61,12 @@ inline Square make_sq  (int r, int c)     { return r * 10 + c; }
 inline bool   valid_rc (int r, int c)     { return r >= 0 && r < 10 && c >= 0 && c < 10; }
 inline bool   valid_sq (Square sq)        { return sq >= 0 && sq < 100; }
 
-// Convert square to algebraic notation (e.g. 0 �?"a1", 99 �?"j10")
+// Convert square to algebraic notation (e.g. 0 — "a1", 99 — "j10")
 inline std::string sq_to_str(Square sq) {
     return std::string(1, 'a' + sq_col(sq)) + std::to_string(sq_row(sq) + 1);
 }
 
-// Convert algebraic notation to square (e.g. "a1" �?0)
+// Convert algebraic notation to square (e.g. "a1" — 0)
 inline Square str_to_sq(const std::string& s) {
     if (s.size() < 2) return -1;
     int c = s[0] - 'a';
@@ -93,4 +93,3 @@ inline std::string move_to_str(Move m) {
 // ── 8 Queen directions: N S E W NE SW NW SE ─────────────────────
 constexpr int DR[8] = { 1, -1,  0,  0,  1, -1,  1, -1 };
 constexpr int DC[8] = { 0,  0,  1, -1,  1, -1, -1,  1 };
-
