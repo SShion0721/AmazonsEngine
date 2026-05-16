@@ -23,7 +23,7 @@ Release 会启用：
 - MSVC: `/O2 /DNDEBUG /GL /arch:AVX2`
 - GCC/Clang: `-O3 -DNDEBUG -march=native -flto -funroll-loops`
 
-## 常用命令
+## 常用命令 
 
 | 命令 | 说明 |
 |---|---|
@@ -435,3 +435,5 @@ selfplay 100000 8 1000 1 64 1
 
 ### 5. 常见致胜组合
 - **最强对弈配置**：`Search Mode = Match` + `Use MCTS Root = true` + `Use NNUE = true` + `Threads = [CPU 最大核心数]` + `Hash = 1024MB+`。
+
+
