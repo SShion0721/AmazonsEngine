@@ -1,0 +1,21 @@
+Ablation mcts_fast | Use MCTS Root=true, Use Strong Classical=true, Eval Tier=Fast | 100ms | 20g
+G6: L E1=B
+G5: L E1=W
+G2: L E1=B
+G9: L E1=W
+G8: L E1=B
+G4: L E1=B
+G1: L E1=W
+G10: L E1=B
+G11: L E1=W
+G15: L E1=W
+G14: L E1=B
+G16: L E1=B
+G20: L E1=B
+G18: L E1=B
+G19: L E1=W
+G7: L E1=W
+G12: L E1=B
+G3: L E1=W
+G13: L E1=W
+G17: L E1=W

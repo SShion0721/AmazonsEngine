@@ -162,13 +162,24 @@ AdaptiveMctsParams adaptive_mcts_params(const Position& pos, int remaining_ms) {
         params.config.uct_c = 0.40;
     }
 
-    if (remaining_ms < 300) {
-        params.time_share = std::min(params.time_share, 70);
+    if (remaining_ms < 150) {
+        // Ultra-fast mode: maximize simulations per second
+        params.time_share = 100;
+        params.verify_topn = 0;
+        params.config.root_initial_width = 24;
+        params.config.root_max_candidates = 48;
+        params.config.root_width_step = 4;
+        params.config.width_visit_step = 32;
+        params.config.node_initial_width = 4;
+        params.config.node_max_candidates = 24;
+        params.config.rollout_plies = 2;
+    } else if (remaining_ms < 300) {
+        params.time_share = std::min(params.time_share, 80);
         if (params.verify_topn > 0)
             params.verify_topn = std::min(params.verify_topn, 3);
-        params.config.root_initial_width = std::min(params.config.root_initial_width, 96);
-        params.config.root_max_candidates = std::min(params.config.root_max_candidates, 256);
-        params.config.node_max_candidates = std::min(params.config.node_max_candidates, 96);
+        params.config.root_initial_width = std::min(params.config.root_initial_width, 64);
+        params.config.root_max_candidates = std::min(params.config.root_max_candidates, 128);
+        params.config.node_max_candidates = std::min(params.config.node_max_candidates, 64);
         params.config.rollout_plies = std::min(params.config.rollout_plies, 4);
     } else if (remaining_ms >= 1500 && arrows < 20) {
         params.config.root_initial_width = 256;

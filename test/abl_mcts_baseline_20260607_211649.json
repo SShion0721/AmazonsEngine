@@ -1,0 +1,17 @@
+{
+  "config": "mcts_baseline",
+  "extra": {
+    "Use MCTS Root": "true",
+    "Use Strong Classical": "true",
+    "Eval Tier": "Strong",
+    "Use Bounded MoveGen": "false"
+  },
+  "w1": 0,
+  "w2": 20,
+  "draws": 0,
+  "elo": -400,
+  "se": 0,
+  "score": 0.0,
+  "games": 20,
+  "ms": 100
+}

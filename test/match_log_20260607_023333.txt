@@ -1,0 +1,347 @@
+Amazon Chess Engine Match Test
+Timestamp: 20260607_023333
+Engine 1: AmazonsEngine (Match, MCTS Root, Strong Classical, Eval Tier=Strong, Threads=1, Hash=256MB)
+Engine 2: MCTS AI (UCT search, 100ms per move)
+Games: 100, Parallel: 6
+============================================================
+
+Game 3: E1 wins (invalid move) in 10 moves
+  Move 1: E2 g1-g9/d9
+  Move 2: E1 d10-f8/f10
+  Move 3: E2 a4-c6/i6
+  Move 4: E1 g10-d7/c7
+  Move 5: E2 d1-d3/f5
+  Move 6: E1 j7-h9/c4
+  Move 7: E2 g9-h8/d4
+  Move 8: E1 d7-h7/i7
+  Move 9: E2 j4-h4/h6
+  Move 10: E1 h7-g8/d5
+  Move 11: E2 invalid move h8-i9/g7
+
+Game 5: E1 wins (invalid move) in 14 moves
+  Move 1: E2 d1-d9/g9
+  Move 2: E1 d10-i5/i4
+  Move 3: E2 g1-g4/i6
+  Move 4: E1 j7-e7/b4
+  Move 5: E2 j4-j8/e3
+  Move 6: E1 a7-c7/c8
+  Move 7: E2 a4-c6/f9
+  Move 8: E1 i5-d5/d7
+  Move 9: E2 j8-h8/h9
+  Move 10: E1 c7-h2/d6
+  Move 11: E2 c6-c4/c1
+  Move 12: E1 g10-d10/g7
+  Move 13: E2 d9-c9/c10
+  Move 14: E1 e7-g5/i7
+  Move 15: E2 invalid move g4-h3/f5
+
+Game 4: E2 wins (invalid move) in 16 moves
+  Move 1: E1 j4-d4/g7
+  Move 2: E2 j7-g4/e2
+  Move 3: E1 d4-f4/f10
+  Move 4: E2 d10-d3/d2
+  Move 5: E1 a4-b5/d7
+  Move 6: E2 g10-g9/b4
+  Move 7: E1 g1-i3/g3
+  Move 8: E2 a7-b6/d6
+  Move 9: E1 b5-h5/f5
+  Move 10: E2 d3-c2/c1
+  Move 11: E1 f4-c4/g8
+  Move 12: E2 g4-h3/f1
+  Move 13: E1 c4-c8/c5
+  Move 14: E2 c2-e4/c2
+  Move 15: E1 c8-c7/b7
+  Move 16: E2 e4-e8/g6
+  Move 17: E1 invalid move h5-h4/h10
+
+Game 1: E2 wins (invalid move) in 17 moves
+  Move 1: E2 g1-g9/d9
+  Move 2: E1 d10-i5/i4
+  Move 3: E2 d1-f3/i6
+  Move 4: E1 g10-b5/f9
+  Move 5: E2 a4-c4/a4
+  Move 6: E1 a7-e3/c5
+  Move 7: E2 g9-e7/h4
+  Move 8: E1 j7-g7/f8
+  Move 9: E2 j4-j8/h6
+  Move 10: E1 i5-f5/d5
+  Move 11: E2 j8-h8/g8
+  Move 12: E1 g7-i7/g7
+  Move 13: E2 h8-i8/h8
+  Move 14: E1 b5-d7/e6
+  Move 15: E2 e7-c9/c7
+  Move 16: E1 d7-b9/b5
+  Move 17: E2 c4-c3/d2
+  Move 18: E1 invalid move i7-j7/h7
+
+Game 0: E1 wins (invalid move) in 15 moves
+  Move 1: E1 j4-d4/g7
+  Move 2: E2 j7-g4/e2
+  Move 3: E1 d4-f4/f10
+  Move 4: E2 d10-d3/b5
+  Move 5: E1 g1-i3/h3
+  Move 6: E2 g10-g9/b4
+  Move 7: E1 a4-a6/g6
+  Move 8: E2 a7-b7/b6
+  Move 9: E1 a6-a8/g8
+  Move 10: E2 d3-c2/d2
+  Move 11: E1 i3-h4/h9
+  Move 12: E2 g9-i7/h6
+  Move 13: E1 a8-d8/c8
+  Move 14: E2 g4-g3/g1
+  Move 15: E1 f4-f3/c6
+  Move 16: E2 invalid move b7-e7/a7
+
+Game 9: E2 wins (invalid move) in 11 moves
+  Move 1: E2 d1-d9/g9
+  Move 2: E1 d10-i5/i4
+  Move 3: E2 g1-g4/h4
+  Move 4: E1 i5-e5/e9
+  Move 5: E2 j4-h6/b6
+  Move 6: E1 a7-f7/g6
+  Move 7: E2 a4-d4/d7
+  Move 8: E1 f7-f3/c3
+  Move 9: E2 h6-h8/i7
+  Move 10: E1 g10-c10/c4
+  Move 11: E2 d9-c9/d9
+  Move 12: E1 invalid move e5-c5/h5
+
+Game 2: E2 wins (invalid move) in 14 moves
+  Move 1: E1 j4-d4/g7
+  Move 2: E2 j7-g4/e2
+  Move 3: E1 d4-f4/f10
+  Move 4: E2 d10-d3/c2
+  Move 5: E1 a4-e8/d7
+  Move 6: E2 g10-g8/f7
+  Move 7: E1 d1-a1/d4
+  Move 8: E2 a7-b8/b2
+  Move 9: E1 e8-c8/b7
+  Move 10: E2 b8-a7/a2
+  Move 11: E1 a1-e1/c3
+  Move 12: E2 g4-h4/f2
+  Move 13: E1 g1-i3/h3
+  Move 14: E2 a7-b8/e5
+  Move 15: E1 invalid move d1-f1/d3
+
+Game 7: E2 wins (invalid move) in 37 moves
+  Move 1: E2 d1-d9/g9
+  Move 2: E1 d10-i5/i4
+  Move 3: E2 g1-g6/i6
+  Move 4: E1 i5-e5/e9
+  Move 5: E2 a4-c4/h9
+  Move 6: E1 j7-d7/d3
+  Move 7: E2 j4-g1/b6
+  Move 8: E1 g10-c10/c5
+  Move 9: E2 g6-f6/b10
+  Move 10: E1 e5-f4/d4
+  Move 11: E2 g1-g3/g4
+  Move 12: E1 d7-e8/f7
+  Move 13: E2 d9-b7/a6
+  Move 14: E1 c10-c8/e6
+  Move 15: E2 f6-g7/g8
+  Move 16: E1 a7-b8/a7
+  Move 17: E2 b7-c7/d8
+  Move 18: E1 e8-b5/c6
+  Move 19: E2 c4-c3/b4
+  Move 20: E1 b5-a4/c2
+  Move 21: E2 c3-b3/a3
+  Move 22: E1 b8-d10/b8
+  Move 23: E2 c7-d7/g10
+  Move 24: E1 f4-h6/f4
+  Move 25: E2 g3-h3/h5
+  Move 26: E1 h6-h8/h7
+  Move 27: E2 h3-j1/j10
+  Move 28: E1 h8-j6/h8
+  Move 29: E2 g7-i5/j5
+  Move 30: E1 j6-i7/j6
+  Move 31: E2 i5-h6/g5
+  Move 32: E1 c8-c7/c8
+  Move 33: E2 j1-e1/e5
+  Move 34: E1 c7-d6/c7
+  Move 35: E2 e1-h1/d5
+  Move 36: E1 d6-e7/e8
+  Move 37: E2 h1-g2/e4
+  Move 38: E1 invalid move e7-f8/d6
+
+Game 11: E2 wins (invalid move) in 27 moves
+  Move 1: E2 g1-g9/d9
+  Move 2: E1 d10-f8/f10
+  Move 3: E2 d1-d6/i6
+  Move 4: E1 j7-b7/b4
+  Move 5: E2 a4-c6/b6
+  Move 6: E1 b7-e7/c7
+  Move 7: E2 d6-e5/f6
+  Move 8: E1 e7-e6/d5
+  Move 9: E2 j4-g4/g7
+  Move 10: E1 f8-j8/g5
+  Move 11: E2 c6-b7/a6
+  Move 12: E1 a7-b8/h8
+  Move 13: E2 g9-h9/j7
+  Move 14: E1 g10-c6/d6
+  Move 15: E2 e5-e3/c5
+  Move 16: E1 e6-e4/f3
+  Move 17: E2 b7-c8/d7
+  Move 18: E1 j8-h6/h3
+  Move 19: E2 e3-d3/b5
+  Move 20: E1 b8-b10/d8
+  Move 21: E2 c8-b9/b7
+  Move 22: E1 e4-e2/e4
+  Move 23: E2 g4-h4/f2
+  Move 24: E1 e2-d2/c3
+  Move 25: E2 d3-c2/c1
+  Move 26: E1 h6-i5/i3
+  Move 27: E2 c2-d3/c2
+  Move 28: E1 invalid move b10-e10/a10
+
+Game 13: E2 wins (invalid move) in 9 moves
+  Move 1: E2 g1-g9/d9
+  Move 2: E1 d10-f8/f10
+  Move 3: E2 a4-c6/i6
+  Move 4: E1 g10-d7/c7
+  Move 5: E2 d1-d3/f5
+  Move 6: E1 j7-h9/c4
+  Move 7: E2 j4-h6/d6
+  Move 8: E1 f8-f6/f8
+  Move 9: E2 d3-e3/g5
+  Move 10: E1 invalid move f6-d4/g7
+
+Game 10: E1 wins (invalid move) in 49 moves
+  Move 1: E1 j4-d4/g7
+  Move 2: E2 j7-g4/g2
+  Move 3: E1 d4-d9/d7
+  Move 4: E2 a7-c5/b4
+  Move 5: E1 a4-a6/c4
+  Move 6: E2 g10-e8/e2
+  Move 7: E1 a6-d6/d4
+  Move 8: E2 g4-h3/h2
+  Move 9: E1 g1-f2/f8
+  Move 10: E2 e8-g6/c2
+  Move 11: E1 f2-f6/f5
+  Move 12: E2 h3-h4/e1
+  Move 13: E1 f6-g5/g4
+  Move 14: E2 c5-c6/c8
+  Move 15: E1 g5-i5/h6
+  Move 16: E2 d10-e9/e3
+  Move 17: E1 d6-e5/g3
+  Move 18: E2 g6-h7/i6
+  Move 19: E1 i5-i4/g6
+  Move 20: E2 h4-i3/h3
+  Move 21: E1 i4-j3/i4
+  Move 22: E2 h7-j7/j4
+  Move 23: E1 e5-d6/c7
+  Move 24: E2 j7-h9/e6
+  Move 25: E1 d6-c5/b5
+  Move 26: E2 i3-c9/i3
+  Move 27: E1 d9-e10/d10
+  Move 28: E2 e9-f9/f10
+  Move 29: E1 c5-b6/b10
+  Move 30: E2 c9-d9/e9
+  Move 31: E1 b6-c5/b6
+  Move 32: E2 c6-d5/d6
+  Move 33: E1 c5-c6/c5
+  Move 34: E2 d9-b9/b7
+  Move 35: E1 e10-d9/c10
+  Move 36: E2 f9-e8/d8
+  Move 37: E1 d1-d3/e4
+  Move 38: E2 e8-g10/e8
+  Move 39: E1 d3-a3/a8
+  Move 40: E2 h9-h7/e10
+  Move 41: E1 d9-c9/b8
+  Move 42: E2 d5-e5/d5
+  Move 43: E1 j3-j1/j3
+  Move 44: E2 e5-f4/e5
+  Move 45: E1 j1-f1/f3
+  Move 46: E2 f4-g5/f4
+  Move 47: E1 a3-a4/a7
+  Move 48: E2 g10-h9/g10
+  Move 49: E1 a4-a3/d3
+  Move 50: E2 invalid move g5-h4/e7
+
+Game 15: E2 wins (invalid move) in 11 moves
+  Move 1: E2 d1-d9/g9
+  Move 2: E1 d10-i5/i4
+  Move 3: E2 g1-g4/h5
+  Move 4: E1 j7-b7/c8
+  Move 5: E2 a4-c6/b6
+  Move 6: E1 b7-e7/d7
+  Move 7: E2 j4-j7/h9
+  Move 8: E1 a7-a3/c5
+  Move 9: E2 c6-f6/f10
+  Move 10: E1 g10-e8/f7
+  Move 11: E2 f6-c3/a1
+  Move 12: E1 invalid move e8-d8/j8
+
+Game 17: E2 wins (invalid move) in 7 moves
+  Move 1: E2 d1-d9/g9
+  Move 2: E1 d10-i5/i4
+  Move 3: E2 g1-g5/h5
+  Move 4: E1 a7-e3/f4
+  Move 5: E2 a4-d4/d7
+  Move 6: E1 g10-e10/e5
+  Move 7: E2 g5-i7/i8
+  Move 8: E1 invalid move e3-d3/i3
+
+Game 16: E2 wins in 48 moves
+  Move 1: E1 d1-d9/h9
+  Move 2: E2 g10-g3/f2
+  Move 3: E1 j4-h6/g7
+  Move 4: E2 a7-c5/b4
+  Move 5: E1 d9-g6/d6
+  Move 6: E2 d10-e9/a5
+  Move 7: E1 g6-d3/f3
+  Move 8: E2 c5-c4/b5
+  Move 9: E1 d3-d5/e4
+  Move 10: E2 c4-b3/a3
+  Move 11: E1 g1-i3/i8
+  Move 12: E2 e9-d8/f6
+  Move 13: E1 i3-h3/d7
+  Move 14: E2 b3-c2/b3
+  Move 15: E1 d5-j5/j6
+  Move 16: E2 j7-i6/h5
+  Move 17: E1 h6-h7/h6
+  Move 18: E2 d8-g8/d5
+  Move 19: E1 h7-g6/h7
+  Move 20: E2 g8-f8/f7
+  Move 21: E1 g6-g5/g4
+  Move 22: E2 i6-i3/i6
+  Move 23: E1 g5-e5/c3
+  Move 24: E2 f8-e9/e6
+  Move 25: E1 j5-j4/h4
+  Move 26: E2 g3-f4/f5
+  Move 27: E1 e5-d4/d2
+  Move 28: E2 e9-c9/c5
+  Move 29: E1 j4-j2/h2
+  Move 30: E2 c2-d3/c4
+  Move 31: E1 h3-i4/j3
+  Move 32: E2 i3-i2/j1
+  Move 33: E1 j2-i1/j2
+  Move 34: E2 f4-g3/g1
+  Move 35: E1 d4-e3/f4
+  Move 36: E2 g3-g2/h1
+  Move 37: E1 e3-e1/f1
+  Move 38: E2 d3-e2/d1
+  Move 39: E1 i4-i3/h3
+  Move 40: E2 e2-d3/e2
+  Move 41: E1 i3-j4/i3
+  Move 42: E2 d3-b1/c1
+  Move 43: E1 j4-i5/i4
+  Move 44: E2 c9-c8/g8
+  Move 45: E1 i5-j4/i5
+  Move 46: E2 g2-g3/g2
+  Move 47: E1 j4-j5/j4
+  Move 48: E2 c8-c9/g9
+
+Game 19: E1 wins (invalid move) in 12 moves
+  Move 1: E2 g1-g9/d9
+  Move 2: E1 d10-i5/i4
+  Move 3: E2 d1-f3/i6
+  Move 4: E1 g10-b5/f9
+  Move 5: E2 g9-g7/b7
+  Move 6: E1 a7-e3/a3
+  Move 7: E2 a4-c2/i8
+  Move 8: E1 b5-d3/c3
+  Move 9: E2 f3-d5/h5
+  Move 10: E1 i5-f2/f8
+  Move 11: E2 j4-h2/g1
+  Move 12: E1 e3-e6/e5
+  Move 13: E2 invalid move d5-d7/d4

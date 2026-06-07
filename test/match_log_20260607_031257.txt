@@ -1,0 +1,16 @@
+Match: AmazonsEngine vs Amazon Champion MCTS
+Time: 100ms/move | Games: 100
+============================================================
+Game 6: E1 win (10 moves) E1=B
+Game 3: E1 win (21 moves) E1=W
+Game 2: E1 win (22 moves) E1=B
+Game 1: E2 win (10 moves) E1=W
+Game 5: E1 win (21 moves) E1=W
+Game 8: E1 win (6 moves) E1=B
+Game 9: E1 win (7 moves) E1=W
+Game 12: E2 win (17 moves) E1=B
+Game 11: E2 win (20 moves) E1=W
+Game 15: E2 win (44 moves) E1=W
+Game 14: E2 win (61 moves) E1=B
+Game 17: E1 win (17 moves) E1=W
+Game 18: E2 win (7 moves) E1=B

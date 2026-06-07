@@ -1,0 +1,55 @@
+{
+  "timestamp": "20260607_023040",
+  "engine1": "AmazonsEngine (Match mode, Strong eval, MCTS root)",
+  "engine2": "MCTS AI (Amazon Python module)",
+  "movetime_ms": 100,
+  "games": 6,
+  "parallel": 6,
+  "total_time_sec": 5.015941858291626,
+  "results": [
+    {
+      "game": 1,
+      "result": "engine1_win",
+      "engine1_white": true,
+      "moves": 7
+    },
+    {
+      "game": 2,
+      "result": "engine1_win",
+      "engine1_white": false,
+      "moves": 12
+    },
+    {
+      "game": 3,
+      "result": "engine1_win",
+      "engine1_white": true,
+      "moves": 5
+    },
+    {
+      "game": 4,
+      "result": "engine1_win",
+      "engine1_white": false,
+      "moves": 22
+    },
+    {
+      "game": 5,
+      "result": "engine1_win",
+      "engine1_white": true,
+      "moves": 17
+    },
+    {
+      "game": 6,
+      "result": "engine1_win",
+      "engine1_white": false,
+      "moves": 12
+    }
+  ],
+  "summary": {
+    "engine1_wins": 6,
+    "engine2_wins": 0,
+    "draws": 0,
+    "elo_diff": 400,
+    "elo_se": 0,
+    "score_pct": 100.0
+  }
+}
