@@ -178,8 +178,8 @@ bool ensure_candidates_locked(Node& node,
 
     node.candidates.reserve(std::min(raw_count, is_root ? cfg.root_max_candidates : cfg.node_max_candidates));
     for (int i = 0; i < raw_count; ++i) {
-        int prior = is_root ? champion_move_prior(pos, raw[i], root_side)
-                            : cheap_move_prior(pos, raw[i], root_side);
+        // Use cheap_move_prior for speed - champion_move_prior is too expensive at low time controls
+        int prior = cheap_move_prior(pos, raw[i], root_side);
         if (is_root && root_policy && cfg.use_policy_prior && policy_prior_loaded()) {
             const int policy = policy_move_prior(*root_policy, raw[i]);
             const int blend = std::clamp(cfg.policy_blend, 0, 100);

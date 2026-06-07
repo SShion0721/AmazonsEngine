@@ -1,0 +1,16 @@
+{
+  "config": "mcts_fast",
+  "extra": {
+    "Use MCTS Root": "true",
+    "Use Strong Classical": "true",
+    "Eval Tier": "Fast"
+  },
+  "w1": 0,
+  "w2": 20,
+  "draws": 0,
+  "elo": -400,
+  "se": 0,
+  "score": 0.0,
+  "games": 20,
+  "ms": 100
+}

@@ -1,0 +1,15 @@
+{
+  "config": "+nmp+softtail",
+  "extra": {
+    "Use Null Move": "true",
+    "Use Soft Tail Search": "true"
+  },
+  "w1": 2,
+  "w2": 18,
+  "draws": 0,
+  "elo": -381.69700377572997,
+  "se": 129.48159783849644,
+  "score": 10.0,
+  "games": 20,
+  "ms": 100
+}

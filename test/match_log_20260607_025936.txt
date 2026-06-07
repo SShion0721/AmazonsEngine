@@ -1,0 +1,30 @@
+Amazon Chess Engine Match Test
+Timestamp: 20260607_025936
+Engine 1: AmazonsEngine (Match, MCTS Root, Strong Classical, Eval Tier=Strong, Threads=1, Hash=256MB)
+Engine 2: MCTS AI (UCT search, 100ms per move)
+Games: 100, Parallel: 2
+============================================================
+
+Game 1: E2 wins (invalid move) in 17 moves
+  Move 1: E2 d1-d9/g9
+  Move 2: E1 d10-i5/i4
+  Move 3: E2 g1-g6/i6
+  Move 4: E1 i5-e5/e9
+  Move 5: E2 a4-d4/f4
+  Move 6: E1 j7-f7/c4
+  Move 7: E2 j4-h2/h9
+  Move 8: E1 invalid move f7-d7/h7, retrying...
+  Move 8: E1 invalid move f7-d7/h7, retrying...
+  Move 8: E1 f7-f5/f7
+  Move 9: E2 d9-d7/f9
+  Move 10: E1 a7-b7/g2
+  Move 11: E2 d7-c8/e10
+  Move 12: E1 f5-g5/d8
+  Move 13: E2 h2-h4/j6
+  Move 14: E1 g5-g3/h3
+  Move 15: E2 g6-i8/i10
+  Move 16: E1 g3-d3/h7
+  Move 17: E2 d4-c3/a5
+  Move 18: E1 invalid move d3-d2/d7, retrying...
+  Move 18: E1 invalid move d3-d2/d7, retrying...
+  Move 18: E1 invalid move d3-d2/d7 after 3 attempts

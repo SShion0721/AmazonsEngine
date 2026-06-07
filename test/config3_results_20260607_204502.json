@@ -1,0 +1,9 @@
+{
+  "config": "Bounded(10,6)+NullMove+NoCategories",
+  "w1": 19,
+  "w2": 81,
+  "draws": 0,
+  "elo": -251.89256717032836,
+  "se": 44.28177212523108,
+  "score": 19.0
+}

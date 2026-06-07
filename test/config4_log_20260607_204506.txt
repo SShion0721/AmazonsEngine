@@ -1,0 +1,4 @@
+Config 4 | 100ms/move | 100 games
+G11: E2+ E1=True
+G9: E1+ E1=True
+G8: E2+ E1=False

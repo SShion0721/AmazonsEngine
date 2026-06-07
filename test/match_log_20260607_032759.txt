@@ -1,0 +1,10 @@
+AmazonsEngine vs Amazon Champion MCTS | 100ms/move | 100 games
+G8: E2+ 55mv E1=B
+G11: E2+ 68mv E1=W
+G12: E2+ 63mv E1=B
+G6: E2+ 75mv E1=B
+G4: E2+ 73mv E1=B
+G10: E2+ 75mv E1=B
+G9: E2+ 80mv E1=W
+G2: E2+ 81mv E1=B
+G5: E1+ 91mv E1=W

@@ -1,0 +1,14 @@
+{
+  "config": "+softtail",
+  "extra": {
+    "Use Soft Tail Search": "true"
+  },
+  "w1": 3,
+  "w2": 17,
+  "draws": 0,
+  "elo": -301.33106666344463,
+  "se": 108.78630162082247,
+  "score": 15.0,
+  "games": 20,
+  "ms": 100
+}
